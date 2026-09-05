@@ -24,6 +24,25 @@ public sealed class GitRepositoryServiceTests
     }
 
     [Fact]
+    public async Task SnapshotRefusesAncestorRepositoryWithoutCommittingItsChanges()
+    {
+        using var root = new TemporaryDirectory();
+        Assert.True((await _git.EnsureProjectRepositoryAsync(root.Path, "Test Writer", "writer@example.test")).Success);
+        var originalHead = (await _git.GetHeadAsync(root.Path)).Output;
+        var project = Path.Combine(root.Path, "nested-story");
+        Directory.CreateDirectory(Path.Combine(project, "Scenes"));
+        await File.WriteAllTextAsync(Path.Combine(project, "Scenes", "one.scene.md"), "nested manuscript");
+        await File.WriteAllTextAsync(Path.Combine(root.Path, "unrelated.txt"), "unrelated change");
+        var originalStatus = (await _git.GetStatusAsync(root.Path)).Output;
+
+        var result = await _git.SnapshotAndSyncAsync(project, "must not commit parent");
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(originalHead, (await _git.GetHeadAsync(root.Path)).Output);
+        Assert.Equal(originalStatus, (await _git.GetStatusAsync(root.Path)).Output);
+    }
+
+    [Fact]
     public async Task SnapshotPushesToBareRemoteAndCloneValidatesStory()
     {
         using var root = new TemporaryDirectory();

@@ -132,6 +132,11 @@ public sealed class GitRepositoryService
         string message,
         CancellationToken cancellationToken = default)
     {
+        var discovered = await RunAsync(projectPath, ["rev-parse", "--show-toplevel"], cancellationToken);
+        if (!discovered.Success) return discovered;
+        if (!string.Equals(NormalizePath(discovered.Output.Trim()), NormalizePath(Path.GetFullPath(projectPath)), StringComparison.OrdinalIgnoreCase))
+            return GitOperationResult.Failed("The project is inside another Git repository. Automatic snapshots cannot use the parent repository.");
+
         var status = await GetStatusAsync(projectPath, cancellationToken);
         if (!status.Success) return status;
         if (string.IsNullOrWhiteSpace(status.Output)) return new GitOperationResult(true, "No changes.");
