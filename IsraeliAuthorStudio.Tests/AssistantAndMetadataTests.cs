@@ -12,6 +12,38 @@ namespace IsraeliAuthorStudio.Tests;
 public sealed class AssistantAndMetadataTests
 {
     [Fact]
+    public async Task ExistingMetadataRemainsVisibleWhenGitSetupFails()
+    {
+        await using var project = await TestProject.CreateAsync(1);
+        var git = new GitRepositoryService(NullLogger<GitRepositoryService>.Instance);
+        // An ancestor repository deterministically refuses setup for the story subfolder.
+        var ancestor = await git.EnsureProjectRepositoryAsync(project.RootPath, "Test Author", "test@example.invalid");
+        Assert.True(ancestor.Success, ancestor.Error);
+        var workspace = await project.Repository.LoadWorkspaceAsync();
+        var metadata = new SceneMetadataRepository(project.Selection);
+        await metadata.EnsureMigratedAsync(workspace.Scenes, workspace.CharactersIndex);
+        await metadata.SaveManualCharactersAsync(project.SceneIds[0], ["Test character"], workspace.Scenes);
+        await metadata.SaveManualAsync(project.SceneIds[0], "Day one", ["Test location"], workspace.Scenes);
+        var originalMetadata = await File.ReadAllTextAsync(Path.Combine(project.Selection.CurrentProjectPath,
+            "Metadata", "Scenes", $"{project.SceneIds[0]}.json"));
+        var rejected = await git.EnsureProjectRepositoryAsync(project.Selection.CurrentProjectPath);
+        Assert.False(rejected.Success);
+
+        var repository = new StoryRepository(project.Selection, new ProjectOperationCoordinator(),
+            new ProjectActivityTracker(), git, metadata,
+            new AssistantSettingsService(new TestWebHostEnvironment(project.RootPath), new MemoryCredentialStore()));
+        var loaded = await repository.LoadWorkspaceAsync();
+
+        Assert.Single(loaded.SceneMetadata);
+        Assert.Contains(loaded.CharactersIndex.Characters, character => character.Name == "Test character");
+        Assert.Contains(loaded.LocationsIndex.Entities, location => location.Name == "Test location");
+        Assert.Equal("Day one", loaded.Scenes.Single().Timeline);
+        Assert.Equal(["Test location"], loaded.Scenes.Single().Places);
+        Assert.Equal(originalMetadata, await File.ReadAllTextAsync(Path.Combine(project.Selection.CurrentProjectPath,
+            "Metadata", "Scenes", $"{project.SceneIds[0]}.json")));
+    }
+
+    [Fact]
     public void DesktopFlagEnablesDesktopLaunch()
     {
         Assert.True(DesktopApplication.IsDesktopLaunch(["--desktop"]));

@@ -52,6 +52,22 @@ public sealed class StoryRepositoryTests
     }
 
     [Fact]
+    public async Task ClearingSceneWithinBackupIntervalPreservesLatestText()
+    {
+        await using var context = await TestContext.CreateAsync();
+        var scene = (await context.Repository.LoadWorkspaceAsync()).Scenes.Single();
+        await context.Repository.SaveSceneContentAsync(scene.Id, "First draft");
+        await context.Repository.SaveSceneContentAsync(scene.Id, "Latest manuscript before clearing");
+
+        await context.Repository.SaveSceneContentAsync(scene.Id, "");
+
+        Assert.Empty((await context.Repository.LoadWorkspaceAsync()).Scenes.Single().Content);
+        var backups = Directory.EnumerateFiles(Path.Combine(context.ProjectPath, ".history", scene.Id), "*.scene.md")
+            .Select(File.ReadAllText).ToList();
+        Assert.Contains(backups, backup => backup.Contains("Latest manuscript before clearing", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task SplitAndJoinRoundTripSceneContent()
     {
         await using var context = await TestContext.CreateAsync();

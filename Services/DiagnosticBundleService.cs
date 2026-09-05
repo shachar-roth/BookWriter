@@ -36,7 +36,9 @@ public sealed class DiagnosticBundleService
         await using var output = new MemoryStream();
         using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
         {
-            foreach (var path in EnumerateProjectFiles(projectRoot, omitted))
+            // Current manuscript files take priority over recovery history within the bundle size limit.
+            foreach (var path in EnumerateProjectFiles(projectRoot, omitted)
+                         .OrderBy(path => Path.GetRelativePath(projectRoot, path).Replace('\\', '/').StartsWith(".history/", StringComparison.Ordinal)))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var relativePath = Path.GetRelativePath(projectRoot, path).Replace('\\', '/');
@@ -82,7 +84,7 @@ public sealed class DiagnosticBundleService
                 IncludedProjectFiles = includedFiles,
                 IncludedProjectBytes = includedBytes,
                 Omitted = omitted,
-                Notes = "The bundle contains the manuscript. API credentials and Git internals are intentionally excluded."
+                Notes = "The bundle contains the manuscript and local scene recovery history, subject to size limits. API credentials and Git internals are intentionally excluded."
             };
             await WriteTextEntryAsync(
                 archive,
@@ -152,7 +154,6 @@ public sealed class DiagnosticBundleService
 
     private static bool IsExcludedDirectory(string relativePath) =>
         relativePath.Equals(".git", StringComparison.OrdinalIgnoreCase) ||
-        relativePath.Equals(".history", StringComparison.OrdinalIgnoreCase) ||
         relativePath.Equals(".studio/cache", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsExcludedFile(string relativePath)

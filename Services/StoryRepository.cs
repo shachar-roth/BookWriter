@@ -25,6 +25,7 @@ public sealed class StoryRepository
     private readonly SceneMetadataRepository? _metadata;
     private readonly AssistantSettingsService? _assistantSettings;
     private readonly bool _integrationsEnabled;
+    private readonly ILogger<StoryRepository>? _logger;
 
     public StoryRepository(ProjectSelectionService projectSelection)
     {
@@ -38,7 +39,8 @@ public sealed class StoryRepository
         ProjectActivityTracker activity,
         GitRepositoryService git,
         SceneMetadataRepository metadata,
-        AssistantSettingsService assistantSettings)
+        AssistantSettingsService assistantSettings,
+        ILogger<StoryRepository>? logger = null)
     {
         _projectSelection = projectSelection;
         _gate = operations.Gate;
@@ -47,6 +49,7 @@ public sealed class StoryRepository
         _metadata = metadata;
         _assistantSettings = assistantSettings;
         _integrationsEnabled = true;
+        _logger = logger;
     }
 
     private string StoryRoot => _projectSelection.CurrentProjectPath;
@@ -87,8 +90,17 @@ public sealed class StoryRepository
             {
                 await _git.CommitAsync(StoryRoot, "Migrate scene metadata");
             }
-            var metadataWorkspace = await _metadata.LoadWorkspaceAsync();
-            workspace.SceneMetadata = metadataWorkspace.SceneMetadata;
+        }
+        else
+        {
+            _logger?.LogWarning("Git setup failed; existing scene metadata remains available. Reason: {Reason}", repository.Error);
+        }
+
+        // Reading existing metadata does not require Git. Only migration needs a baseline commit.
+        var metadataWorkspace = await _metadata.LoadWorkspaceAsync();
+        workspace.SceneMetadata = metadataWorkspace.SceneMetadata;
+        if (_metadata.IsInitialized)
+        {
             workspace.CharactersIndex = metadataWorkspace.Characters;
             workspace.LocationsIndex = metadataWorkspace.Locations;
             workspace.TimelineIndex = metadataWorkspace.Timeline;
@@ -924,7 +936,13 @@ public sealed class StoryRepository
 
         if (createBackup)
         {
-            await BackupSceneIfDueCoreAsync(scene.Id);
+            var previous = File.Exists(GetScenePath(scene.Id))
+                ? await ReadSceneMarkdownCoreAsync(GetScenePath(scene.Id))
+                : null;
+            var clearingContent = !string.IsNullOrWhiteSpace(previous?.Content) && string.IsNullOrWhiteSpace(scene.Content);
+            await BackupSceneIfDueCoreAsync(scene.Id, force: clearingContent);
+            if (clearingContent)
+                _logger?.LogWarning("Scene {SceneId} cleared; previous content preserved in local history. PreviousLength={PreviousLength}", scene.Id, previous!.Content.Length);
         }
 
         var builder = new StringBuilder();
@@ -943,7 +961,7 @@ public sealed class StoryRepository
         _activity?.MarkMutation();
     }
 
-    private async Task BackupSceneIfDueCoreAsync(string sceneId)
+    private async Task BackupSceneIfDueCoreAsync(string sceneId, bool force = false)
     {
         var source = GetScenePath(sceneId);
         if (!File.Exists(source))
@@ -957,12 +975,12 @@ public sealed class StoryRepository
             .Select(path => new FileInfo(path))
             .OrderByDescending(file => file.CreationTimeUtc)
             .FirstOrDefault();
-        if (newest is not null && DateTime.UtcNow - newest.CreationTimeUtc < BackupInterval)
+        if (!force && newest is not null && DateTime.UtcNow - newest.CreationTimeUtc < BackupInterval)
         {
             return;
         }
 
-        var backup = Path.Combine(directory, $"{DateTime.UtcNow:yyyyMMdd-HHmmssfff}.scene.md");
+        var backup = Path.Combine(directory, $"{DateTime.UtcNow:yyyyMMdd-HHmmssfff}-{Guid.NewGuid():N}.scene.md");
         await using (var sourceStream = File.OpenRead(source))
         await using (var backupStream = File.Create(backup))
         {

@@ -53,10 +53,12 @@ public sealed class DiagnosticBundleTests
             Directory.CreateDirectory(Path.Combine(projectRoot, "Scenes"));
             Directory.CreateDirectory(Path.Combine(projectRoot, "Metadata", "Scenes"));
             Directory.CreateDirectory(Path.Combine(projectRoot, ".git"));
+            Directory.CreateDirectory(Path.Combine(projectRoot, ".history", "scn-one"));
             Directory.CreateDirectory(Path.Combine(applicationData.RootPath, "Logs"));
             await File.WriteAllTextAsync(Path.Combine(projectRoot, "Scenes", "scn-one.scene.md"), "scene text");
             await File.WriteAllTextAsync(Path.Combine(projectRoot, "Metadata", "Scenes", "scn-one.json"), "{\"sceneId\":\"scn-one\"}");
             await File.WriteAllTextAsync(Path.Combine(projectRoot, ".git", "config"), "private remote");
+            await File.WriteAllTextAsync(Path.Combine(projectRoot, ".history", "scn-one", "backup.scene.md"), "recoverable scene text");
             await File.WriteAllTextAsync(Path.Combine(projectRoot, ".env"), "OPENAI_API_KEY=secret");
             await File.WriteAllTextAsync(Path.Combine(applicationData.RootPath, "Logs", "studio-20260830.log"), "diagnostic log");
 
@@ -73,6 +75,10 @@ public sealed class DiagnosticBundleTests
             var names = archive.Entries.Select(entry => entry.FullName).ToList();
 
             Assert.Contains("project/Scenes/scn-one.scene.md", names);
+            var recoveryEntry = archive.GetEntry("project/.history/scn-one/backup.scene.md");
+            Assert.NotNull(recoveryEntry);
+            using var recoveryReader = new StreamReader(recoveryEntry.Open());
+            Assert.Equal("recoverable scene text", await recoveryReader.ReadToEndAsync());
             Assert.Contains("project/Metadata/Scenes/scn-one.json", names);
             Assert.Contains("diagnostics/logs/studio-20260830.log", names);
             Assert.Contains("diagnostics/manifest.json", names);
