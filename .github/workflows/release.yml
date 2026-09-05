@@ -1,0 +1,89 @@
+name: Build macOS release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build when running manually
+        required: true
+        default: 1.0.0
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          } else {
+            $version = "${{ inputs.version }}"
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Version must use the form major.minor.patch. Received: $version"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-restore
+
+      - name: Build macOS packages
+        shell: pwsh
+        run: ./scripts/build-macos.ps1 -Runtime all -Version "${{ steps.version.outputs.version }}"
+
+      - name: Create checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem artifacts/macos/*.zip | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content artifacts/macos/SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IsraeliAuthorStudio-${{ steps.version.outputs.version }}-macOS
+          path: |
+            artifacts/macos/*.zip
+            artifacts/macos/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" `
+            artifacts/macos/*.zip `
+            artifacts/macos/SHA256SUMS.txt `
+            --verify-tag `
+            --generate-notes `
+            --title "Israeli Author Studio ${{ steps.version.outputs.version }}"

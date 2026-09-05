@@ -1,5 +1,7 @@
 # Israeli Author Studio
 
+[![CI](https://github.com/shachar-roth/BookWriter/actions/workflows/ci.yml/badge.svg)](https://github.com/shachar-roth/BookWriter/actions/workflows/ci.yml)
+
 Local, scene-based writing studio for Hebrew book authors.
 
 ## Stack
@@ -19,6 +21,12 @@ dotnet run
 ```
 
 Git must be installed. LLM and remote Git credentials are configured in the application and are never stored inside story repositories.
+
+## Releases
+
+GitHub Actions tests every change. Pushing a semantic version tag such as `v1.1.0` builds the self-contained Apple Silicon and Intel macOS packages and publishes them under [GitHub Releases](https://github.com/shachar-roth/BookWriter/releases).
+
+The macOS packages currently use ad-hoc signatures and are not notarized. See [the macOS installation notes](Packaging/macos/README.md) before installing them.
 
 ## Project layout
 

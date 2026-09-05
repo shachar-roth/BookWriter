@@ -1,6 +1,9 @@
 param(
     [ValidateSet("all", "osx-arm64", "osx-x64")]
-    [string]$Runtime = "all"
+    [string]$Runtime = "all",
+
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$Version = "1.0.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -118,6 +121,7 @@ foreach ($rid in $runtimes) {
         --runtime $rid `
         --self-contained true `
         --output $publishPath `
+        -p:Version=$Version `
         -p:PublishSingleFile=false `
         -p:PublishReadyToRun=false `
         -p:DebugType=None `
@@ -125,7 +129,12 @@ foreach ($rid in $runtimes) {
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for $rid" }
 
     Copy-Item -Path (Join-Path $publishPath "*") -Destination $macOsPath -Recurse -Force
-    Copy-Item -LiteralPath (Join-Path $projectRoot "Packaging\macos\Info.plist") -Destination (Join-Path $contentsPath "Info.plist") -Force
+    $infoPlistPath = Join-Path $contentsPath "Info.plist"
+    Copy-Item -LiteralPath (Join-Path $projectRoot "Packaging\macos\Info.plist") -Destination $infoPlistPath -Force
+    $infoPlist = Get-Content -LiteralPath $infoPlistPath -Raw
+    $infoPlist = $infoPlist -replace '(<key>CFBundleShortVersionString</key>\s*<string>)[^<]+', "`${1}$Version"
+    $infoPlist = $infoPlist -replace '(<key>CFBundleVersion</key>\s*<string>)[^<]+', "`${1}$Version"
+    Set-Content -LiteralPath $infoPlistPath -Value $infoPlist -Encoding utf8
 
     $signingOutput = & $rcodesign sign $appPath 2>&1
     if ($LASTEXITCODE -ne 0) {
