@@ -1,0 +1,1123 @@
+@page "/editor"
+@rendermode InteractiveServer
+@implements IAsyncDisposable
+@using System.Diagnostics
+@using System.Security.Cryptography
+@using System.Text
+
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
+@inject ProjectSelectionService ProjectSelection
+@inject ProjectActivityTracker ProjectActivity
+@inject IdleSnapshotCoordinator SnapshotCoordinator
+@inject MetadataBatchProcessor MetadataProcessor
+@inject StoryRepository StoryRepository
+@inject AgentProposalService AgentProposals
+
+<PageTitle>מרחב סצנות</PageTitle>
+
+<main class="story-shell">
+    <button type="button" class="mobile-sidebar-toggle" aria-label="פתיחת ניווט" title="פתיחת ניווט" @onclick="ToggleMobileSidebar">☰</button>
+
+    <aside class="story-sidebar @(IsMobileSidebarOpen ? "is-mobile-open" : "")" aria-label="אינדקסים">
+        <div class="mobile-sidebar-header">
+            <strong>@ProjectSelection.CurrentProjectName</strong>
+            <button type="button" aria-label="סגירת ניווט" title="סגירת ניווט" @onclick="ToggleMobileSidebar">×</button>
+        </div>
+
+        <div class="sidebar-mode-toolbar" role="tablist" aria-label="תצוגת סרגל צד">
+            <button type="button"
+                    role="tab"
+                    title="סצנות"
+                    aria-label="סצנות"
+                    aria-selected="@(ActiveSidebarMode == SidebarMode.Scenes ? "true" : "false")"
+                    @onclick="() => SetSidebarMode(SidebarMode.Scenes)">▤</button>
+            <button type="button"
+                    role="tab"
+                    title="דמויות"
+                    aria-label="דמויות"
+                    aria-selected="@(ActiveSidebarMode == SidebarMode.Characters ? "true" : "false")"
+                    @onclick="() => SetSidebarMode(SidebarMode.Characters)">👤</button>
+            <button type="button"
+                    role="tab"
+                    title="מקומות"
+                    aria-label="מקומות"
+                    aria-selected="@(ActiveSidebarMode == SidebarMode.Locations ? "true" : "false")"
+                    @onclick="() => SetSidebarMode(SidebarMode.Locations)">🗺</button>
+            <button type="button"
+                    role="tab"
+                    title="ציר זמן"
+                    aria-label="ציר זמן"
+                    aria-selected="@(ActiveSidebarMode == SidebarMode.Timeline ? "true" : "false")"
+                    @onclick="() => SetSidebarMode(SidebarMode.Timeline)">🕙</button>
+            <button type="button"
+                    role="tab"
+                    title="נתוני תצוגה"
+                    aria-label="נתוני תצוגה"
+                    aria-selected="@(ActiveSidebarMode == SidebarMode.Display ? "true" : "false")"
+                    @onclick="() => SetSidebarMode(SidebarMode.Display)">Aa</button>
+        </div>
+        <h2 class="sidebar-mode-title">@SidebarModeTitle</h2>
+
+        @if (ActiveSidebarMode == SidebarMode.Scenes)
+        {
+            <section class="sidebar-mode-content" role="tabpanel" aria-label="סצנות">
+            <nav class="scene-outline" aria-label="סצנות לפי פרקים">
+                @foreach (var chapter in ChapterGroups)
+                {
+                    <section class="chapter-nav-group @(CurrentChapter?.FirstSceneId == chapter.FirstSceneId ? "is-current" : "")"
+                             data-chapter-nav-first="@chapter.FirstSceneId">
+                        <button type="button" class="chapter-nav-heading" @onclick="() => SelectScene(chapter.FirstSceneId)">@chapter.Name</button>
+                        <div class="scene-nav-list">
+                            @foreach (var scene in chapter.Scenes)
+                            {
+                                <button type="button"
+                                        class="scene-nav-item"
+                                        data-scene-nav="@scene.Id"
+                                        @onclick="() => SelectScene(scene.Id)">
+                                    <span class="scene-nav-label">@GetSceneNavTitle(scene)</span>
+                                </button>
+                            }
+                        </div>
+                    </section>
+                }
+                <div class="scene-nav-drop-end" data-scene-drop-end aria-hidden="true"></div>
+            </nav>
+            </section>
+        }
+        else if (ActiveSidebarMode == SidebarMode.Characters)
+        {
+            <section class="sidebar-mode-content character-index-section" role="tabpanel" aria-label="דמויות">
+                @if (CharactersIndex.Characters.Count == 0)
+                {
+                    <p class="sidebar-empty-state">טרם זוהו דמויות.</p>
+                }
+                else
+                {
+                    @foreach (var character in CharactersIndex.Characters)
+                    {
+                        <details>
+                            <summary>@character.Name</summary>
+                            @foreach (var sceneId in character.SceneIds)
+                            {
+                                var scene = FindScene(sceneId);
+                                if (scene is not null)
+                                {
+                                    <button type="button"
+                                            class="index-scene-link"
+                                            data-index-scene="@scene.Id"
+                                            @onclick="() => SelectScene(scene.Id)">@scene.DisplayTitle</button>
+                                }
+                            }
+                        </details>
+                    }
+                }
+            </section>
+        }
+        else if (ActiveSidebarMode == SidebarMode.Locations)
+        {
+            <section class="sidebar-mode-content location-index-section" role="tabpanel" aria-label="מקומות">
+                @if (LocationsIndex.Entities.Count == 0)
+                {
+                    <p class="sidebar-empty-state">טרם זוהו מקומות.</p>
+                }
+                else
+                {
+                    @foreach (var location in LocationsIndex.Entities.OrderBy(location => location.Name, StringComparer.Ordinal))
+                    {
+                        <details>
+                            <summary>@location.Name</summary>
+                            @foreach (var sceneId in location.SceneIds)
+                            {
+                                var scene = FindScene(sceneId);
+                                if (scene is not null)
+                                {
+                                    <button type="button"
+                                            class="index-scene-link"
+                                            data-index-scene="@scene.Id"
+                                            @onclick="() => SelectScene(scene.Id)">@scene.DisplayTitle</button>
+                                }
+                            }
+                        </details>
+                    }
+                }
+            </section>
+        }
+        else if (ActiveSidebarMode == SidebarMode.Timeline)
+        {
+            <section class="sidebar-mode-content timeline-index-section" role="tabpanel" aria-label="ציר זמן">
+                <ol class="timeline-index-list">
+                    @foreach (var (entry, index) in TimelineIndex.Entries.Select((entry, index) => (entry, index)))
+                    {
+                        var scene = FindScene(entry.SceneId);
+                        if (scene is not null)
+                        {
+                            <li>
+                                <button type="button"
+                                        class="timeline-scene-link"
+                                        data-index-scene="@scene.Id"
+                                        @onclick="() => SelectScene(scene.Id)">
+                                    <span class="timeline-index-number">@(index + 1)</span>
+                                    <span class="timeline-index-copy">
+                                        <strong>@(string.IsNullOrWhiteSpace(entry.Label) ? "ללא זמן מוגדר" : entry.Label)</strong>
+                                        <small>@scene.DisplayTitle · @ConfidenceLabel(entry.Confidence)</small>
+                                    </span>
+                                </button>
+                            </li>
+                        }
+                    }
+                </ol>
+            </section>
+        }
+        else
+        {
+            <section class="sidebar-mode-content editor-tools-section" role="tabpanel" aria-label="נתוני תצוגה">
+                <div class="editor-tools" data-editor-tools>
+                <div class="editor-tools-content">
+                    <label class="editor-control">
+                        <span>גודל טקסט</span>
+                        <span class="editor-size-control">
+                            <input type="range" min="14" max="28" step="1" value="18" data-editor-font-size aria-label="גודל טקסט" />
+                            <output data-editor-font-size-output>18</output>
+                        </span>
+                    </label>
+
+                    <label class="editor-control">
+                        <span>גופן</span>
+                        <select data-editor-font-family aria-label="גופן">
+                            <option value="system">מערכת</option>
+                            <option value="arial">Arial</option>
+                            <option value="david">David</option>
+                            <option value="frank">Frank Ruhl</option>
+                            <option value="serif">ספרותי</option>
+                        </select>
+                    </label>
+
+                    <fieldset class="editor-direction-control">
+                        <legend>כיוון טקסט</legend>
+                        <div class="editor-segmented-control" data-editor-direction>
+                            <button type="button" data-direction="rtl" aria-pressed="true">ימין</button>
+                            <button type="button" data-direction="auto" aria-pressed="false">אוטומטי</button>
+                            <button type="button" data-direction="ltr" aria-pressed="false">שמאל</button>
+                        </div>
+                    </fieldset>
+
+                    <dl class="manuscript-statistics" aria-label="נתוני כתב היד" aria-live="polite">
+                        <div>
+                            <dt>מילים</dt>
+                            <dd data-editor-word-count>0</dd>
+                        </div>
+                        <div>
+                            <dt>שורות</dt>
+                            <dd data-editor-line-count>0</dd>
+                        </div>
+                        <div title="הערכה לפי 250 מילים בעמוד">
+                            <dt>עמודים משוערים</dt>
+                            <dd data-editor-page-count>0</dd>
+                        </div>
+                    </dl>
+                    <p class="page-count-note">עמוד משוער = 250 מילים</p>
+                    <button type="button" class="diagnostic-export-command" @onclick="ExportDiagnosticBundle">
+                        הורדת חבילת אבחון
+                    </button>
+                    <p class="diagnostic-export-note">החבילה מכילה את כתב היד והלוגים. היא לא נשלחת אוטומטית.</p>
+                </div>
+                </div>
+            </section>
+        }
+    </aside>
+
+    <section class="scene-workspace" aria-label="סצנות">
+        @if (!string.IsNullOrWhiteSpace(StatusMessage))
+        {
+            <p class="status-message">@StatusMessage</p>
+        }
+
+        @if (CurrentChapter is not null && Scenes.Count > 0)
+        {
+            <section class="chapter-divider current-chapter-divider">
+                <div class="chapter-marker">
+                    <button type="button"
+                            class="chapter-marker-label"
+                            title="שינוי שם הפרק"
+                            aria-label="שינוי שם הפרק"
+                            @onclick="RenameCurrentChapter">@CurrentChapter.Name</button>
+                    <button type="button"
+                            class="chapter-divider-remove"
+                            disabled="@(!HasPreviousChapter)"
+                            title="מחיקת מחיצת פרק"
+                            aria-label="מחיקת מחיצת פרק"
+                            @onclick="RemoveCurrentChapterDivider">×</button>
+                </div>
+                <div class="chapter-divider-line"></div>
+            </section>
+
+            <div class="scene-grid" data-scene-stream>
+                @foreach (var scene in Scenes)
+                {
+                    var chapter = FindChapterForScene(scene.Id)!;
+                    var replaceOperation = GetReplaceOperation(scene.Id);
+                    var structuralOperations = GetStructuralOperations(scene.Id);
+                    <section @key="scene.Id" class="scene-stream-item" data-scene-stream-item="@scene.Id">
+                        @if (scene.Id == chapter.FirstSceneId && scene.Order > 1)
+                        {
+                            <section class="chapter-divider stream-chapter-divider" id="@($"chapter-{chapter.FirstSceneId}")">
+                                <div class="chapter-marker">
+                                    <button type="button"
+                                            class="chapter-marker-label"
+                                            title="שינוי שם הפרק"
+                                            aria-label="שינוי שם הפרק"
+                                            @onclick="() => RenameChapterFromPrompt(chapter)">@chapter.Name</button>
+                                    <button type="button"
+                                            class="chapter-divider-remove"
+                                            title="מחיקת מחיצת פרק"
+                                            aria-label="מחיקת מחיצת פרק"
+                                            @onclick="() => RemoveChapterDivider(chapter)">×</button>
+                                </div>
+                                <div class="chapter-divider-line"></div>
+                            </section>
+                        }
+                        else if (scene.Order > 1)
+                        {
+                            <div class="chapter-insert">
+                                <div class="insert-side insert-side-left">
+                                    <button type="button"
+                                            class="insert-join-button"
+                                            title="מחיקת מחיצת סצנה"
+                                            aria-label="מחיקת מחיצת סצנה"
+                                            @onclick="() => JoinWithPreviousScene(scene)">×</button>
+                                </div>
+                                <button type="button" class="insert-scene-button" title="הוסף סצנה" aria-label="הוסף סצנה" @onclick="() => AddSceneBefore(scene)">+</button>
+                                <div class="insert-side insert-side-right">
+                                    <button type="button" class="insert-chapter-button" @onclick="() => AddChapterBefore(scene)">הוסף פרק</button>
+                                </div>
+                            </div>
+                        }
+
+                        <section id="@($"scene-{scene.Id}")"
+                                 class="@SceneFrameClass(scene)"
+                                 data-chapter-first="@chapter.FirstSceneId"
+                                 data-chapter-name="@chapter.Name"
+                                 data-chapter-index="@ChapterGroups.IndexOf(chapter)"
+                                 data-scene-order="@(scene.Order - 1)">
+                            <article class="scene-bubble">
+                                @foreach (var operation in structuralOperations)
+                                {
+                                    <div class="agent-structural-badge">@DescribeProvisionalOperation(operation)</div>
+                                }
+                                <div class="scene-tools" aria-label="פעולות סצנה">
+                                    <button type="button"
+                                            class="scene-metadata-toggle"
+                                            title="נתוני סצנה"
+                                            aria-label="נתוני סצנה"
+                                            aria-expanded="@(IsSceneMetadataOpen(scene) ? "true" : "false")"
+                                            @onclick="() => ToggleSceneMetadata(scene)">⋯</button>
+                                </div>
+                                @if (replaceOperation is not null && AgentDiffs.TryGetValue(scene.Id, out var diffSegments))
+                                {
+                                    <div class="agent-inline-diff" aria-label="תצוגה מקדימה של שינוי מוצע">
+                                        @foreach (var segment in diffSegments)
+                                        {
+                                            <span class="@DiffSegmentClass(segment.Kind)">@segment.Text</span>
+                                        }
+                                    </div>
+                                }
+                                else
+                                {
+                                    <textarea class="scene-content"
+                                              value="@scene.Content"
+                                              data-scene-textarea="@scene.Id"
+                                              readonly="@(AnalyzingMetadataSceneId == scene.Id)"
+                                              aria-label="טקסט הסצנה"></textarea>
+                                }
+                            </article>
+                        </section>
+                        @foreach (var operation in GetCreatedScenesAfter(scene.Id))
+                        {
+                            <article class="scene-bubble agent-created-scene" aria-label="סצנה חדשה מוצעת">
+                                <div class="agent-structural-badge">סצנה חדשה</div>
+                                <div class="agent-created-content">@operation.Content</div>
+                            </article>
+                        }
+                    </section>
+                }
+
+                @foreach (var operation in GetCreatedScenesAfter(null))
+                {
+                    <article class="scene-bubble agent-created-scene" aria-label="סצנה חדשה מוצעת">
+                        <div class="agent-structural-badge">סצנה חדשה בסוף כתב היד</div>
+                        <div class="agent-created-content">@operation.Content</div>
+                    </article>
+                }
+
+                <div class="chapter-insert chapter-insert-end">
+                    <div class="insert-side insert-side-left"></div>
+                    <button type="button" class="insert-scene-button" title="הוסף סצנה" aria-label="הוסף סצנה" @onclick="AddSceneAtEnd">+</button>
+                    <div class="insert-side insert-side-right">
+                        <button type="button" class="insert-chapter-button" @onclick="AddChapterAtEnd">הוסף פרק</button>
+                    </div>
+                </div>
+            </div>
+        }
+    </section>
+    @if (OpenMetadataScene is { } metadataScene)
+    {
+        <aside class="scene-metadata-inspector" aria-label="נתוני סצנה">
+            <header>
+                <div>
+                    <h2>נתוני סצנה</h2>
+                    <span>@GetSceneNavTitle(metadataScene)</span>
+                </div>
+                <button type="button" class="metadata-close" title="סגירה" aria-label="סגירת נתוני סצנה" @onclick="CloseSceneMetadata">×</button>
+            </header>
+
+            <section class="metadata-chip-section">
+                <h3>דמויות @MetadataLockLabel(metadataScene, "characters")</h3>
+                <div class="metadata-chip-list">
+                    @foreach (var character in GetSceneCharacterEntities(metadataScene))
+                    {
+                        <EditableMetadataChip @key="character.Id"
+                                              Value="@character.Name"
+                                              EditLabel="עריכת דמות"
+                                              Suggestions="@CharacterSuggestions"
+                                              OnCommit="value => SaveCharacterChip(metadataScene, character.Id, value)" />
+                    }
+                    <EditableMetadataChip IsAdd="true"
+                                          AddLabel="הוספת דמות"
+                                          EditLabel="שם הדמות"
+                                          Suggestions="@CharacterSuggestions"
+                                          OnCommit="value => SaveCharacterChip(metadataScene, null, value)" />
+                </div>
+            </section>
+
+            <section class="metadata-chip-section">
+                <h3>מקומות @MetadataLockLabel(metadataScene, "locations")</h3>
+                <div class="metadata-chip-list">
+                    @foreach (var location in GetSceneLocationEntities(metadataScene))
+                    {
+                        <EditableMetadataChip @key="location.Id"
+                                              Value="@location.Name"
+                                              EditLabel="עריכת מקום"
+                                              Suggestions="@LocationSuggestions"
+                                              OnCommit="value => SaveLocationChip(metadataScene, location.Id, value)" />
+                    }
+                    <EditableMetadataChip IsAdd="true"
+                                          AddLabel="הוספת מקום"
+                                          EditLabel="שם המקום"
+                                          Suggestions="@LocationSuggestions"
+                                          OnCommit="value => SaveLocationChip(metadataScene, null, value)" />
+                </div>
+            </section>
+
+            <section class="metadata-chip-section">
+                <h3>ציר זמן @MetadataLockLabel(metadataScene, "time")</h3>
+                <div class="metadata-chip-list timeline-chip-list">
+                    @if (!string.IsNullOrWhiteSpace(metadataScene.Timeline))
+                    {
+                        <EditableMetadataChip Value="@metadataScene.Timeline"
+                                              Wide="true"
+                                              EditLabel="עריכת זמן"
+                                              Suggestions="@TimelineSuggestions"
+                                              OnCommit="value => SaveTimelineChip(metadataScene, value)" />
+                    }
+                    else
+                    {
+                        <EditableMetadataChip IsAdd="true"
+                                              Wide="true"
+                                              AddLabel="הוספת זמן"
+                                              EditLabel="תיאור הזמן"
+                                              Suggestions="@TimelineSuggestions"
+                                              OnCommit="value => SaveTimelineChip(metadataScene, value)" />
+                    }
+                </div>
+                <p class="metadata-analysis-note">@TimelineDescription(metadataScene)</p>
+            </section>
+
+            <div class="metadata-inspector-actions">
+                <button type="button"
+                        class="metadata-reanalyze-command"
+                        disabled="@(AnalyzingMetadataSceneId is not null)"
+                        aria-busy="@(AnalyzingMetadataSceneId == metadataScene.Id ? "true" : "false")"
+                        @onclick="() => AnalyzeMetadataNow(metadataScene)">@(AnalyzingMetadataSceneId == metadataScene.Id ? "מנתח..." : "נתח עכשיו")</button>
+                <button type="button" class="split-scene-command" @onclick="() => SplitSceneAtCursor(metadataScene)">פצל במיקום הסמן</button>
+            </div>
+            @if (MetadataAnalysisMessageSceneId == metadataScene.Id && !string.IsNullOrWhiteSpace(MetadataAnalysisMessage))
+            {
+                <p class="metadata-analysis-status" role="status">@MetadataAnalysisMessage</p>
+                @if (MetadataAnalysisTiming is { } timing && timing.SceneId == metadataScene.Id)
+                {
+                    <dl class="metadata-analysis-timings" aria-label="זמני ניתוח הסצנה">
+                        <div class="is-total"><dt>סה״כ</dt><dd>@FormatDuration(timing.TotalDuration)</dd></div>
+                        <div><dt>AI</dt><dd>@FormatDuration(timing.AiDuration)</dd></div>
+                        <div><dt>עדכון מטא־דאטה ואינדקסים</dt><dd>@FormatDuration(timing.IndexUpdateDuration)</dd></div>
+                        <div><dt>הכנה מקומית</dt><dd>@FormatDuration(timing.PreparationDuration)</dd></div>
+                        <div><dt>טעינת העורך</dt><dd>@FormatDuration(timing.EditorReloadDuration)</dd></div>
+                    </dl>
+                }
+            }
+        </aside>
+    }
+    @if (PendingAgentProposal is { } pendingProposal)
+    {
+        <section class="agent-review-toolbar @(pendingProposal.IsStale ? "is-stale" : "")" aria-label="בדיקת שינויי העוזר">
+            <div class="agent-review-summary">
+                <strong>@pendingProposal.Summary</strong>
+                <span>@AgentReviewPositionLabel</span>
+                @if (pendingProposal.IsStale)
+                {
+                    <small>כתב היד השתנה. יש לבטל את ההצעה ולבקש הצעה חדשה.</small>
+                }
+            </div>
+            <div class="agent-review-navigation">
+                <button type="button" title="השינוי הקודם" aria-label="השינוי הקודם" disabled="@(AgentReviewSceneIds.Count < 2)" @onclick="PreviousAgentReview">↑</button>
+                <button type="button" title="השינוי הבא" aria-label="השינוי הבא" disabled="@(AgentReviewSceneIds.Count < 2)" @onclick="NextAgentReview">↓</button>
+            </div>
+            <div class="agent-review-actions">
+                <button type="button" @onclick="RejectAgentProposal">בטל הכל</button>
+                <button type="button" class="agent-accept" disabled="@pendingProposal.IsStale" @onclick="ApplyAgentProposal">קבל הכל</button>
+            </div>
+        </section>
+    }
+    else if (LastAppliedProposal is { IsApplied: true, IsUndone: false } appliedProposal)
+    {
+        <section class="agent-review-toolbar is-applied" aria-label="השינוי האחרון של העוזר">
+            <div class="agent-review-summary">
+                <strong>השינוי הוחל</strong>
+                <span>@appliedProposal.Summary</span>
+            </div>
+            <div class="agent-review-actions">
+                <button type="button" @onclick="UndoLastAgentProposal">בטל שינוי</button>
+            </div>
+        </section>
+    }
+    <AssistantPanel ActiveSceneId="@ActiveSceneId"
+                    OnBeforeRequest="FlushAll"
+                    OnProposalPrepared="StageAgentProposal"
+                    OnProposalFocusRequested="FocusAgentProposal" />
+</main>
+
+@code {
+    private List<SceneEditorModel> Scenes { get; set; } = [];
+    private List<ChapterEditorGroup> ChapterGroups { get; set; } = [];
+    private CharactersIndexDocument CharactersIndex { get; set; } = new();
+    private EntityIndexDocument LocationsIndex { get; set; } = new();
+    private Dictionary<string, SceneMetadataDocument> SceneMetadata { get; set; } = new(StringComparer.Ordinal);
+    private TimelineIndexDocument TimelineIndex { get; set; } = new();
+    private Dictionary<string, IReadOnlyList<AgentDiffSegment>> AgentDiffs { get; } = new(StringComparer.Ordinal);
+    private List<string> AgentReviewSceneIds { get; set; } = [];
+    private AgentProposal? PendingAgentProposal { get; set; }
+    private AgentProposal? LastAppliedProposal { get; set; }
+    private int AgentReviewIndex { get; set; }
+    private string StatusMessage { get; set; } = "";
+    private string? ActiveChapterFirstSceneId { get; set; }
+    private string? ActiveSceneId { get; set; }
+    private string? OpenMetadataSceneId { get; set; }
+    private string? AnalyzingMetadataSceneId { get; set; }
+    private string? MetadataAnalysisMessageSceneId { get; set; }
+    private string MetadataAnalysisMessage { get; set; } = "";
+    private MetadataAnalysisTimingDisplay? MetadataAnalysisTiming { get; set; }
+    private SidebarMode ActiveSidebarMode { get; set; } = SidebarMode.Scenes;
+    private bool IsMobileSidebarOpen { get; set; }
+    private DotNetObjectReference<Editor>? DotNetReference { get; set; }
+    private CancellationTokenSource ComponentCancellation { get; } = new();
+
+    private ChapterEditorGroup? CurrentChapter => ChapterGroups.FirstOrDefault(chapter => chapter.FirstSceneId == ActiveChapterFirstSceneId) ?? ChapterGroups.FirstOrDefault();
+    private int CurrentChapterIndex => CurrentChapter is null ? -1 : ChapterGroups.IndexOf(CurrentChapter);
+    private bool HasPreviousChapter => CurrentChapterIndex > 0;
+    private string SidebarModeTitle => ActiveSidebarMode switch
+    {
+        SidebarMode.Scenes => "סצנות",
+        SidebarMode.Characters => "דמויות",
+        SidebarMode.Locations => "מקומות",
+        SidebarMode.Timeline => "ציר זמן",
+        _ => "נתוני תצוגה"
+    };
+    private SceneEditorModel? OpenMetadataScene => string.IsNullOrWhiteSpace(OpenMetadataSceneId) ? null : FindScene(OpenMetadataSceneId);
+    private IReadOnlyList<string> CharacterSuggestions => CharactersIndex.Characters.Select(character => character.Name).OrderBy(name => name, StringComparer.Ordinal).ToList();
+    private IReadOnlyList<string> LocationSuggestions => LocationsIndex.Entities.Select(location => location.Name).OrderBy(name => name, StringComparer.Ordinal).ToList();
+    private IReadOnlyList<string> TimelineSuggestions => TimelineIndex.Entries.Select(entry => entry.Label).Where(label => !string.IsNullOrWhiteSpace(label)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    private string ProjectKey => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ProjectSelection.CurrentProjectPath)))[..16];
+
+    protected override async Task OnInitializedAsync()
+    {
+        ProjectActivity.RegisterEditor();
+        await Reload();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        DotNetReference ??= DotNetObjectReference.Create(this);
+        await JS.InvokeVoidAsync("sceneEditor.bind", DotNetReference, ProjectKey);
+    }
+
+    private async Task Reload(string? preferredSceneId = null)
+    {
+        var workspace = await StoryRepository.LoadWorkspaceAsync();
+        Scenes = workspace.Scenes.Select(SceneEditorModel.FromDocument).OrderBy(scene => scene.Order).ToList();
+
+        var byId = Scenes.ToDictionary(scene => scene.Id, StringComparer.Ordinal);
+        ChapterGroups = workspace.ChaptersIndex.Chapters
+            .Select(chapter => new ChapterEditorGroup
+            {
+                Name = chapter.Name,
+                FirstSceneId = chapter.SceneIds.FirstOrDefault() ?? "",
+                Scenes = chapter.SceneIds.Where(byId.ContainsKey).Select(id => byId[id]).ToList()
+            })
+            .Where(chapter => chapter.Scenes.Count > 0)
+            .ToList();
+        CharactersIndex = workspace.CharactersIndex;
+        LocationsIndex = workspace.LocationsIndex;
+        SceneMetadata = workspace.SceneMetadata;
+        TimelineIndex = workspace.TimelineIndex;
+        ActiveSceneId = preferredSceneId ?? ActiveSceneId ?? Scenes.FirstOrDefault()?.Id;
+
+        if (preferredSceneId is not null && FindScene(preferredSceneId) is not null)
+        {
+            ActiveChapterFirstSceneId = FindChapterForScene(preferredSceneId)?.FirstSceneId;
+        }
+        else
+        {
+            ActiveChapterFirstSceneId ??= ChapterGroups.FirstOrDefault()?.FirstSceneId;
+        }
+    }
+
+    [JSInvokable]
+    public async Task SaveSceneContent(string sceneId, string content)
+    {
+        var scene = FindScene(sceneId);
+        if (scene is null) return;
+        scene.Content = content;
+        await StoryRepository.SaveSceneContentAsync(sceneId, content);
+        if (PendingAgentProposal is { } proposal &&
+            proposal.Operations.Any(operation =>
+                operation.SceneId == sceneId &&
+                !string.IsNullOrWhiteSpace(operation.ExpectedContentHash) &&
+                !string.Equals(
+                    operation.ExpectedContentHash,
+                    SceneMetadataRepository.ComputeContentHash(content),
+                    StringComparison.Ordinal)))
+        {
+            proposal.IsStale = true;
+            StateHasChanged();
+        }
+        await JS.InvokeVoidAsync("sceneEditor.markSaved", sceneId, content);
+    }
+
+    [JSInvokable]
+    public async Task ReorderSceneFromMenu(string draggedSceneId, string? targetSceneId)
+    {
+        if (string.IsNullOrWhiteSpace(draggedSceneId) || draggedSceneId == targetSceneId) return;
+        if (string.IsNullOrWhiteSpace(targetSceneId)) await StoryRepository.MoveSceneToEndAsync(draggedSceneId);
+        else await StoryRepository.ReorderSceneBeforeAsync(draggedSceneId, targetSceneId);
+        await Reload(draggedSceneId);
+        StatusMessage = "סדר הסצנות עודכן";
+        StateHasChanged();
+    }
+
+    [JSInvokable]
+    public Task ActiveChapterChanged(string chapterFirstSceneId)
+    {
+        if (ActiveChapterFirstSceneId == chapterFirstSceneId) return Task.CompletedTask;
+        ActiveChapterFirstSceneId = chapterFirstSceneId;
+        return Task.CompletedTask;
+    }
+
+    [JSInvokable]
+    public Task ActiveSceneChanged(string sceneId)
+    {
+        ActiveSceneId = sceneId;
+        return Task.CompletedTask;
+    }
+
+    private async Task SelectScene(string sceneId)
+    {
+        if (FindScene(sceneId) is null) return;
+        await FlushAll();
+        ActiveSceneId = sceneId;
+        ActiveChapterFirstSceneId = FindChapterForScene(sceneId)?.FirstSceneId;
+        IsMobileSidebarOpen = false;
+        await JS.InvokeVoidAsync("sceneEditor.scrollToScene", sceneId);
+    }
+
+    private void ToggleMobileSidebar() => IsMobileSidebarOpen = !IsMobileSidebarOpen;
+    private void SetSidebarMode(SidebarMode mode) => ActiveSidebarMode = mode;
+
+    private async Task AddSceneAtEnd()
+    {
+        if (Scenes.LastOrDefault() is not { } last) return;
+        await PrepareStructuralMutation();
+        var created = await StoryRepository.CreateSceneAfterAsync(last.Id);
+        await Reload(created?.Id);
+        StatusMessage = "נוצרה סצנה חדשה";
+    }
+
+    private async Task AddSceneBefore(SceneEditorModel scene)
+    {
+        await PrepareStructuralMutation();
+        var created = await StoryRepository.CreateSceneBeforeAsync(scene.Id);
+        await Reload(created?.Id);
+        StatusMessage = "נוצרה סצנה חדשה";
+    }
+
+    private async Task AddChapterBefore(SceneEditorModel scene)
+    {
+        await PrepareStructuralMutation();
+        await StoryRepository.AddChapterDividerBeforeSceneAsync(scene.Id);
+        await Reload(scene.Id);
+        StatusMessage = "נוסף פרק";
+    }
+
+    private async Task AddChapterAtEnd()
+    {
+        if (Scenes.LastOrDefault() is not { } last) return;
+        await PrepareStructuralMutation();
+        var created = await StoryRepository.CreateChapterAfterAsync(last.Id);
+        await Reload(created?.Id);
+        StatusMessage = "נוסף פרק";
+    }
+
+    private async Task JoinWithPreviousScene(SceneEditorModel scene)
+    {
+        await PrepareStructuralMutation();
+        var sceneIndex = Scenes.IndexOf(scene);
+        if (sceneIndex <= 0) return;
+        var previous = Scenes[sceneIndex - 1];
+        await StoryRepository.JoinWithNextSceneAsync(previous.ToDocument());
+        await Reload(previous.Id);
+        StatusMessage = "הסצנות חוברו";
+    }
+
+    private async Task SplitSceneAtCursor(SceneEditorModel scene)
+    {
+        var content = await JS.InvokeAsync<string?>("sceneEditor.getSceneValue", scene.Id);
+        if (content is null) return;
+        scene.Content = content;
+        var offset = await JS.InvokeAsync<int>("sceneEditor.getSelectionStart", scene.Id);
+        if (offset <= 0 || offset >= content.Length)
+        {
+            StatusMessage = "יש למקם את הסמן בתוך הטקסט";
+            return;
+        }
+        await StoryRepository.SplitSceneAsync(scene.ToDocument(), offset);
+        await Reload(scene.Id);
+        OpenMetadataSceneId = null;
+        StatusMessage = "הסצנה פוצלה";
+    }
+
+    private async Task RemoveChapterDivider(ChapterEditorGroup chapter)
+    {
+        await PrepareStructuralMutation();
+        var chapterIndex = ChapterGroups.IndexOf(chapter);
+        if (chapterIndex <= 0) return;
+        var previousId = ChapterGroups[chapterIndex - 1].FirstSceneId;
+        await StoryRepository.RemoveChapterDividerAsync(chapter.FirstSceneId);
+        await Reload(previousId);
+        StatusMessage = "מחיצת הפרק נמחקה";
+    }
+
+    private async Task RemoveCurrentChapterDivider()
+    {
+        if (CurrentChapter is not null) await RemoveChapterDivider(CurrentChapter);
+    }
+
+    private async Task RenameChapterFromPrompt(ChapterEditorGroup chapter)
+    {
+        var newName = await JS.InvokeAsync<string?>("sceneEditor.promptChapterName", chapter.Name);
+        if (newName is null) return;
+        await PrepareStructuralMutation();
+        await StoryRepository.RenameChapterAsync(chapter.FirstSceneId, newName);
+        await Reload(chapter.FirstSceneId);
+        StatusMessage = "שם הפרק עודכן";
+    }
+
+    private async Task RenameCurrentChapter()
+    {
+        if (CurrentChapter is not null) await RenameChapterFromPrompt(CurrentChapter);
+    }
+
+    private async Task SaveTimelineChip(SceneEditorModel scene, string value)
+    {
+        scene.Timeline = value;
+        await StoryRepository.SaveSceneMetadataAsync(scene.Id, scene.Timeline, scene.Places);
+        await ReloadMetadata();
+        StatusMessage = "נתוני הסצנה נשמרו";
+    }
+
+    private async Task SaveLocationChip(SceneEditorModel scene, string? entityId, string value)
+    {
+        var places = GetSceneLocationEntities(scene)
+            .Where(location => location.Id != entityId)
+            .Select(location => location.Name)
+            .ToList();
+        if (!string.IsNullOrWhiteSpace(value)) places.Add(value);
+        scene.Places = places.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        await StoryRepository.SaveSceneMetadataAsync(scene.Id, scene.Timeline, scene.Places);
+        await ReloadMetadata();
+        StatusMessage = "נתוני הסצנה נשמרו";
+    }
+
+    private async Task SaveCharacterChip(SceneEditorModel scene, string? entityId, string value)
+    {
+        var names = GetSceneCharacterEntities(scene)
+            .Where(character => character.Id != entityId)
+            .Select(character => character.Name)
+            .ToList();
+        if (!string.IsNullOrWhiteSpace(value)) names.Add(value);
+        await StoryRepository.SaveSceneCharactersAsync(scene.Id, names);
+        await ReloadMetadata();
+        StatusMessage = "נתוני הסצנה נשמרו";
+    }
+
+    private async Task ReloadMetadata()
+    {
+        var workspace = await StoryRepository.LoadWorkspaceAsync();
+        CharactersIndex = workspace.CharactersIndex;
+        LocationsIndex = workspace.LocationsIndex;
+        SceneMetadata = workspace.SceneMetadata;
+        TimelineIndex = workspace.TimelineIndex;
+        var scenesById = workspace.Scenes.ToDictionary(scene => scene.Id, StringComparer.Ordinal);
+        foreach (var scene in Scenes)
+        {
+            if (!scenesById.TryGetValue(scene.Id, out var updated)) continue;
+            scene.Timeline = updated.Timeline;
+            scene.Places = [.. updated.Places];
+        }
+    }
+
+    private async Task AnalyzeMetadataNow(SceneEditorModel scene)
+    {
+        if (AnalyzingMetadataSceneId is not null) return;
+        var totalTimer = Stopwatch.StartNew();
+        MetadataAnalysisTiming = null;
+
+        var currentContent = await JS.InvokeAsync<string?>("sceneEditor.getSceneValue", scene.Id);
+        if (currentContent is null)
+        {
+            StatusMessage = "לא ניתן לקרוא את תוכן הסצנה";
+            return;
+        }
+
+        scene.Content = currentContent;
+        AnalyzingMetadataSceneId = scene.Id;
+        MetadataAnalysisMessageSceneId = scene.Id;
+        MetadataAnalysisMessage = "מנתח את הסצנה...";
+        StatusMessage = MetadataAnalysisMessage;
+        await JS.InvokeVoidAsync("sceneEditor.setSceneReadOnly", scene.Id, true);
+        StateHasChanged();
+        await Task.Yield();
+
+        try
+        {
+            var result = await MetadataProcessor.AnalyzeSceneNowAsync(scene.Id, ComponentCancellation.Token);
+            var reloadDuration = TimeSpan.Zero;
+            if (result.Success)
+            {
+                var reloadTimer = Stopwatch.StartNew();
+                await Reload(scene.Id);
+                reloadTimer.Stop();
+                reloadDuration = reloadTimer.Elapsed;
+            }
+            totalTimer.Stop();
+            var preparationDuration = totalTimer.Elapsed - result.AiDuration - result.IndexUpdateDuration - reloadDuration;
+            if (preparationDuration < TimeSpan.Zero) preparationDuration = TimeSpan.Zero;
+            MetadataAnalysisTiming = new MetadataAnalysisTimingDisplay(
+                scene.Id,
+                totalTimer.Elapsed,
+                preparationDuration,
+                result.AiDuration,
+                result.IndexUpdateDuration,
+                reloadDuration);
+            MetadataAnalysisMessage = result.Message;
+            StatusMessage = result.Message;
+        }
+        catch (OperationCanceledException) when (ComponentCancellation.IsCancellationRequested)
+        {
+        }
+        catch
+        {
+            MetadataAnalysisMessage = "הניתוח נכשל. נסו שוב.";
+            StatusMessage = MetadataAnalysisMessage;
+        }
+        finally
+        {
+            try { await JS.InvokeVoidAsync("sceneEditor.setSceneReadOnly", scene.Id, false); }
+            catch (JSDisconnectedException) { }
+            AnalyzingMetadataSceneId = null;
+        }
+    }
+
+    private async Task FlushAll() => await JS.InvokeVoidAsync("sceneEditor.flushAll");
+    private async Task ExportDiagnosticBundle()
+    {
+        await FlushAll();
+        Navigation.NavigateTo("/diagnostics/export", forceLoad: true);
+    }
+    private async Task PrepareStructuralMutation()
+    {
+        await FlushAll();
+    }
+
+    private async Task StageAgentProposal(AgentProposal proposal)
+    {
+        await FlushAll();
+        if (PendingAgentProposal is { } previous && previous.Id != proposal.Id) previous.IsRejected = true;
+        PendingAgentProposal = proposal;
+        MarkAgentProposalStaleIfNeeded(proposal);
+        LastAppliedProposal = null;
+        BuildAgentProposalPreview(proposal);
+        StatusMessage = "השינויים המוצעים מוצגים בכתב היד.";
+        StateHasChanged();
+        await FocusAgentProposal(proposal);
+    }
+
+    private async Task FocusAgentProposal(AgentProposal proposal)
+    {
+        if (proposal.IsRejected || proposal.IsUndone) return;
+        if (!proposal.IsApplied)
+        {
+            PendingAgentProposal = proposal;
+            MarkAgentProposalStaleIfNeeded(proposal);
+            BuildAgentProposalPreview(proposal);
+        }
+        else
+        {
+            LastAppliedProposal = proposal;
+            StatusMessage = "השינוי כבר הוחל.";
+            return;
+        }
+
+        if (AgentReviewSceneIds.Count > 0)
+        {
+            AgentReviewIndex = Math.Clamp(AgentReviewIndex, 0, AgentReviewSceneIds.Count - 1);
+            await JS.InvokeVoidAsync("sceneEditor.scrollToScene", AgentReviewSceneIds[AgentReviewIndex]);
+        }
+    }
+
+    private void BuildAgentProposalPreview(AgentProposal proposal)
+    {
+        AgentDiffs.Clear();
+        foreach (var operation in proposal.Operations.Where(operation => operation.Kind == AgentOperationKind.ReplaceSceneText))
+        {
+            var scene = FindScene(operation.SceneId);
+            if (scene is not null) AgentDiffs[scene.Id] = AgentDiffService.Build(scene.Content, operation.Content ?? "");
+        }
+
+        AgentReviewSceneIds = proposal.Operations
+            .Select(operation => FindScene(operation.SceneId) is not null
+                ? operation.SceneId
+                : FindScene(operation.TargetSceneId ?? "") is not null
+                    ? operation.TargetSceneId!
+                    : Scenes.LastOrDefault()?.Id)
+            .Where(sceneId => !string.IsNullOrWhiteSpace(sceneId))
+            .Distinct(StringComparer.Ordinal)
+            .Cast<string>()
+            .ToList();
+        AgentReviewIndex = 0;
+    }
+
+    private void MarkAgentProposalStaleIfNeeded(AgentProposal proposal)
+    {
+        proposal.IsStale = proposal.Operations.Any(operation =>
+        {
+            if (string.IsNullOrWhiteSpace(operation.ExpectedContentHash)) return false;
+            var scene = FindScene(operation.SceneId);
+            return scene is null || !string.Equals(
+                operation.ExpectedContentHash,
+                SceneMetadataRepository.ComputeContentHash(scene.Content),
+                StringComparison.Ordinal);
+        });
+    }
+
+    private async Task ApplyAgentProposal()
+    {
+        if (PendingAgentProposal is not { } proposal || proposal.IsStale) return;
+        if (proposal.Operations.Any(operation => operation.Kind == AgentOperationKind.DeleteScene))
+        {
+            var confirmed = await JS.InvokeAsync<bool>("confirm", "ההצעה כוללת מחיקת סצנה. להמשיך?");
+            if (!confirmed) return;
+        }
+
+        await PrepareStructuralMutation();
+        var result = await AgentProposals.ApplyAsync(proposal, ComponentCancellation.Token);
+        StatusMessage = result.Message;
+        if (!result.Success)
+        {
+            proposal.IsStale = result.IsStale || proposal.IsStale;
+            return;
+        }
+
+        LastAppliedProposal = proposal;
+        PendingAgentProposal = null;
+        ClearAgentProposalPreview();
+        await Reload(ActiveSceneId);
+    }
+
+    private void RejectAgentProposal()
+    {
+        if (PendingAgentProposal is null) return;
+        PendingAgentProposal.IsRejected = true;
+        PendingAgentProposal = null;
+        ClearAgentProposalPreview();
+        StatusMessage = "ההצעה בוטלה.";
+    }
+
+    private async Task UndoLastAgentProposal()
+    {
+        if (LastAppliedProposal is not { } proposal) return;
+        await PrepareStructuralMutation();
+        var result = await AgentProposals.UndoAsync(proposal, ComponentCancellation.Token);
+        StatusMessage = result.Message;
+        if (!result.Success) return;
+        LastAppliedProposal = null;
+        await Reload(ActiveSceneId);
+    }
+
+    private async Task PreviousAgentReview()
+    {
+        if (AgentReviewSceneIds.Count == 0) return;
+        AgentReviewIndex = (AgentReviewIndex - 1 + AgentReviewSceneIds.Count) % AgentReviewSceneIds.Count;
+        await JS.InvokeVoidAsync("sceneEditor.scrollToScene", AgentReviewSceneIds[AgentReviewIndex]);
+    }
+
+    private async Task NextAgentReview()
+    {
+        if (AgentReviewSceneIds.Count == 0) return;
+        AgentReviewIndex = (AgentReviewIndex + 1) % AgentReviewSceneIds.Count;
+        await JS.InvokeVoidAsync("sceneEditor.scrollToScene", AgentReviewSceneIds[AgentReviewIndex]);
+    }
+
+    private void ClearAgentProposalPreview()
+    {
+        AgentDiffs.Clear();
+        AgentReviewSceneIds = [];
+        AgentReviewIndex = 0;
+    }
+
+    private string AgentReviewPositionLabel => AgentReviewSceneIds.Count == 0
+        ? $"{PendingAgentProposal?.Operations.Count ?? 0} שינויים"
+        : $"סצנה {AgentReviewIndex + 1} מתוך {AgentReviewSceneIds.Count}";
+    private AgentOperation? GetReplaceOperation(string sceneId) =>
+        PendingAgentProposal?.Operations.FirstOrDefault(operation =>
+            operation.Kind == AgentOperationKind.ReplaceSceneText && operation.SceneId == sceneId);
+    private IReadOnlyList<AgentOperation> GetStructuralOperations(string sceneId) =>
+        PendingAgentProposal?.Operations.Where(operation =>
+            operation.Kind != AgentOperationKind.ReplaceSceneText &&
+            operation.Kind != AgentOperationKind.CreateScene &&
+            operation.SceneId == sceneId).ToList() ?? [];
+    private IReadOnlyList<AgentOperation> GetCreatedScenesAfter(string? sceneId) =>
+        PendingAgentProposal?.Operations.Where(operation =>
+            operation.Kind == AgentOperationKind.CreateScene &&
+            (sceneId is null
+                ? string.IsNullOrWhiteSpace(operation.TargetSceneId)
+                : operation.TargetSceneId == sceneId)).ToList() ?? [];
+    private string SceneFrameClass(SceneEditorModel scene)
+    {
+        var classes = new List<string> { "scene-frame" };
+        if (IsSceneMetadataOpen(scene)) classes.Add("is-metadata-open");
+        if (PendingAgentProposal?.Operations.Any(operation =>
+                operation.Kind == AgentOperationKind.DeleteScene && operation.SceneId == scene.Id) == true)
+            classes.Add("agent-proposed-delete");
+        if (PendingAgentProposal?.Operations.Any(operation => operation.SceneId == scene.Id) == true)
+            classes.Add("agent-proposed-change");
+        return string.Join(' ', classes);
+    }
+    private static string DiffSegmentClass(AgentDiffKind kind) => $"diff-segment diff-{kind.ToString().ToLowerInvariant()}";
+    private static string DescribeProvisionalOperation(AgentOperation operation) => operation.Kind switch
+    {
+        AgentOperationKind.DeleteScene => "הסצנה תימחק",
+        AgentOperationKind.SplitScene => "הסצנה תפוצל",
+        AgentOperationKind.JoinScenes => "הסצנה תחובר לסצנה הבאה",
+        AgentOperationKind.MoveScene => "הסצנה תועבר למיקום חדש",
+        AgentOperationKind.CreateChapter => "יתווסף כאן פרק",
+        AgentOperationKind.RenameChapter => $"שם הפרק ישתנה ל-{operation.ChapterName}",
+        AgentOperationKind.UpdateMetadata => "נתוני הסצנה יעודכנו",
+        _ => "שינוי מבני מוצע"
+    };
+    private SceneEditorModel? FindScene(string sceneId) => Scenes.FirstOrDefault(scene => scene.Id == sceneId);
+    private ChapterEditorGroup? FindChapterForScene(string sceneId) => ChapterGroups.FirstOrDefault(chapter => chapter.Scenes.Any(scene => scene.Id == sceneId));
+    private bool IsSceneMetadataOpen(SceneEditorModel scene) => OpenMetadataSceneId == scene.Id;
+    private void ToggleSceneMetadata(SceneEditorModel scene) => OpenMetadataSceneId = IsSceneMetadataOpen(scene) ? null : scene.Id;
+    private void CloseSceneMetadata() => OpenMetadataSceneId = null;
+    private List<CharacterIndexEntry> GetSceneCharacterEntities(SceneEditorModel scene)
+    {
+        if (!SceneMetadata.TryGetValue(scene.Id, out var metadata)) return [];
+        var byId = (CharactersIndex.Characters ?? []).ToDictionary(character => character.Id, StringComparer.Ordinal);
+        return (metadata.CharacterIds ?? []).Where(byId.ContainsKey).Select(id => byId[id]).ToList();
+    }
+    private List<EntityIndexEntry> GetSceneLocationEntities(SceneEditorModel scene)
+    {
+        if (!SceneMetadata.TryGetValue(scene.Id, out var metadata)) return [];
+        var byId = (LocationsIndex.Entities ?? []).ToDictionary(location => location.Id, StringComparer.Ordinal);
+        return (metadata.LocationIds ?? []).Where(byId.ContainsKey).Select(id => byId[id]).ToList();
+    }
+    private List<string> GetSceneCharacters(SceneEditorModel scene) => CharactersIndex.Characters.Where(character => character.SceneIds.Contains(scene.Id, StringComparer.Ordinal)).Select(character => character.Name).OrderBy(name => name, StringComparer.Ordinal).ToList();
+    private string MetadataLockLabel(SceneEditorModel scene, string field)
+    {
+        if (!SceneMetadata.TryGetValue(scene.Id, out var metadata)) return "";
+        var locked = field switch
+        {
+            "characters" => metadata.Locks?.Characters == true,
+            "locations" => metadata.Locks?.Locations == true,
+            "time" => metadata.Locks?.Time == true,
+            _ => false
+        };
+        return locked ? "· ידני" : "· אוטומטי";
+    }
+
+    private string TimelineDescription(SceneEditorModel scene)
+    {
+        var position = TimelineIndex.Entries.FindIndex(entry => entry.SceneId == scene.Id);
+        var confidence = SceneMetadata.GetValueOrDefault(scene.Id)?.Time?.Confidence ?? "unknown";
+        var confidenceText = confidence switch { "high" => "ודאות גבוהה", "medium" => "ודאות בינונית", "low" => "ודאות נמוכה", "manual" => "הוגדר ידנית", _ => "טרם נותח" };
+        return position < 0 ? confidenceText : $"מיקום {position + 1} בציר הזמן · {confidenceText}";
+    }
+    private static string ConfidenceLabel(string confidence) => confidence switch
+    {
+        "high" => "ודאות גבוהה",
+        "medium" => "ודאות בינונית",
+        "low" => "ודאות נמוכה",
+        "manual" => "ידני",
+        _ => "טרם נותח"
+    };
+    private static string GetSceneNavTitle(SceneEditorModel scene) { const int maxLength = 24; var title = scene.DisplayTitle.Trim(); return title.Length <= maxLength ? title : $"{title[..maxLength]}..."; }
+    private static string FormatDuration(TimeSpan duration) => duration.TotalSeconds < 0.01
+        ? "< 0.01 שנ׳"
+        : $"{duration.TotalSeconds:0.00} שנ׳";
+
+    public async ValueTask DisposeAsync()
+    {
+        ComponentCancellation.Cancel();
+        if (DotNetReference is not null)
+        {
+            try { await FlushAll(); } catch (JSDisconnectedException) { }
+        }
+        DotNetReference?.Dispose();
+        ComponentCancellation.Dispose();
+        ProjectActivity.UnregisterEditor();
+        if (ProjectActivity.ActiveEditors == 0) SnapshotCoordinator.RequestSnapshot();
+    }
+
+    private sealed class ChapterEditorGroup
+    {
+        public string Name { get; set; } = "";
+        public string FirstSceneId { get; set; } = "";
+        public List<SceneEditorModel> Scenes { get; set; } = [];
+    }
+
+    private sealed record MetadataAnalysisTimingDisplay(
+        string SceneId,
+        TimeSpan TotalDuration,
+        TimeSpan PreparationDuration,
+        TimeSpan AiDuration,
+        TimeSpan IndexUpdateDuration,
+        TimeSpan EditorReloadDuration);
+
+    private enum SidebarMode
+    {
+        Scenes,
+        Characters,
+        Locations,
+        Timeline,
+        Display
+    }
+}

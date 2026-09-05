@@ -1,0 +1,231 @@
+@implements IDisposable
+
+@inject AgentProposalService AgentProposals
+@inject AssistantConversationService Conversation
+@inject AssistantSettingsService SettingsService
+@inject IdleSnapshotCoordinator SnapshotCoordinator
+@inject ProjectSelectionService ProjectSelection
+@inject ProjectMemoryService ProjectMemory
+@inject SyncStatusService SyncStatus
+
+<aside class="assistant-panel @(IsCollapsed ? "is-collapsed" : "")" aria-label="עוזר כתיבה">
+    <header class="assistant-panel-header">
+        <button type="button" class="assistant-collapse" title="@(IsCollapsed ? "פתיחת העוזר" : "סגירת העוזר")" aria-label="@(IsCollapsed ? "פתיחת העוזר" : "סגירת העוזר")" @onclick="ToggleCollapsed">@(IsCollapsed ? "‹" : "›")</button>
+        @if (!IsCollapsed)
+        {
+            <strong>עוזר כתיבה</strong>
+            <span class="sync-state sync-@SyncStatus.LastResult.State.ToString().ToLowerInvariant()" title="@SyncStatus.LastResult.Message">@SyncStatusText</span>
+            <div class="assistant-header-actions">
+                <button type="button" title="שיחה חדשה" aria-label="שיחה חדשה" @onclick="NewConversation">＋</button>
+                <button type="button" title="הגדרות" aria-label="הגדרות" @onclick="ToggleSettings">⚙</button>
+            </div>
+        }
+    </header>
+
+    @if (!IsCollapsed)
+    {
+        @if (ShowSettings)
+        {
+            <section class="assistant-settings" aria-label="הגדרות עוזר">
+                <label><span>כתובת ספק</span><input dir="ltr" @bind="Settings.Provider.Endpoint" /></label>
+                <label><span>מודל שיחה</span><input dir="ltr" @bind="Settings.Provider.ChatModel" /></label>
+                <label><span>מודל זול לניתוח</span><input dir="ltr" @bind="Settings.Provider.MetadataModel" /></label>
+                <label>
+                    <span>רמת חשיבה לניתוח</span>
+                    <select dir="ltr" @bind="Settings.Provider.MetadataReasoningEffort">
+                        <option value="">Automatic</option>
+                        <option value="none">None (fastest)</option>
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                    </select>
+                </label>
+                <label><span>מפתח API</span><input dir="ltr" type="password" autocomplete="off" @bind="ApiKey" placeholder="נשמר בכספת המערכת" /></label>
+                <div class="assistant-settings-row">
+                    <label><span>שם Git</span><input @bind="Settings.GitAuthorName" /></label>
+                    <label><span>דוא״ל Git</span><input dir="ltr" type="email" @bind="Settings.GitAuthorEmail" /></label>
+                </div>
+                <button type="button" class="assistant-primary" @onclick="SaveSettings">שמור הגדרות</button>
+            </section>
+        }
+
+        <section class="assistant-messages" aria-live="polite">
+            @if (SyncStatus.LastResult.State is SyncState.Conflict or SyncState.AuthenticationFailed or SyncState.Offline or SyncState.Failed)
+            {
+                <div class="sync-alert">
+                    <span>@SyncStatus.LastResult.Message</span>
+                    <button type="button" @onclick="RetrySync">נסה שוב</button>
+                    <button type="button" @onclick="OpenProjectFolder">פתח תיקייה</button>
+                </div>
+            }
+            @if (Messages.Count == 0)
+            {
+                <p class="assistant-empty">אפשר לשאול על הסיפור או לבקש שינוי.</p>
+            }
+            @foreach (var message in Messages)
+            {
+                <article @key="message.Id" class="assistant-message role-@message.Role.ToString().ToLowerInvariant()">
+                    <div>@message.Content</div>
+                    @if (message.Id == StreamingMessageId)
+                    {
+                        <span class="assistant-thinking" role="status" aria-label="העוזר עובד">
+                            <span></span><span></span><span></span>
+                        </span>
+                    }
+                    @if (message.Proposal is { } proposal)
+                    {
+                        <button type="button"
+                                class="assistant-proposal-notice @(proposal.IsStale ? "is-stale" : "")"
+                                disabled="@(proposal.IsRejected || proposal.IsUndone)"
+                                @onclick="() => OnProposalFocusRequested.InvokeAsync(proposal)">
+                            <span>@ProposalNoticeText(proposal)</span>
+                            <strong>הצג בכתב היד</strong>
+                        </button>
+                    }
+                </article>
+            }
+            @if (!string.IsNullOrWhiteSpace(StatusMessage))
+            {
+                <p class="assistant-status">@StatusMessage</p>
+            }
+        </section>
+
+        <footer class="assistant-composer">
+            <textarea @bind="Draft" @bind:event="oninput" placeholder="כתבו לעוזר..." disabled="@IsResponding"></textarea>
+            @if (IsResponding)
+            {
+                <button type="button" @onclick="CancelResponse">עצור</button>
+            }
+            else
+            {
+                <button type="button" class="assistant-primary" disabled="@string.IsNullOrWhiteSpace(Draft)" @onclick="Send">שלח</button>
+            }
+        </footer>
+    }
+</aside>
+
+@code {
+    [Parameter] public string? ActiveSceneId { get; set; }
+    [Parameter] public EventCallback OnBeforeRequest { get; set; }
+    [Parameter] public EventCallback<AgentProposal> OnProposalPrepared { get; set; }
+    [Parameter] public EventCallback<AgentProposal> OnProposalFocusRequested { get; set; }
+
+    private readonly List<AssistantMessage> Messages = [];
+    private AssistantSettings Settings { get; set; } = new();
+    private string ApiKey { get; set; } = "";
+    private string Draft { get; set; } = "";
+    private string StatusMessage { get; set; } = "";
+    private bool IsCollapsed { get; set; }
+    private bool ShowSettings { get; set; }
+    private bool IsResponding { get; set; }
+    private string? StreamingMessageId { get; set; }
+    private CancellationTokenSource? ResponseCancellation { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        Settings = await SettingsService.LoadAsync();
+        SyncStatus.Changed += HandleSyncChanged;
+    }
+
+    private void ToggleCollapsed() => IsCollapsed = !IsCollapsed;
+    private void ToggleSettings() => ShowSettings = !ShowSettings;
+
+    private async Task SaveSettings()
+    {
+        await SettingsService.SaveAsync(Settings, ApiKey);
+        ApiKey = "";
+        ShowSettings = false;
+        StatusMessage = "ההגדרות נשמרו.";
+    }
+
+    private void NewConversation()
+    {
+        ResponseCancellation?.Cancel();
+        Messages.Clear();
+        StatusMessage = "";
+    }
+
+    private async Task Send()
+    {
+        var prompt = Draft.Trim();
+        if (prompt.Length == 0 || IsResponding) return;
+        await OnBeforeRequest.InvokeAsync();
+        Draft = "";
+        StatusMessage = "";
+        var history = Messages.ToList();
+        Messages.Add(new AssistantMessage { Role = AssistantMessageRole.User, Content = prompt });
+        var response = new AssistantMessage { Role = AssistantMessageRole.Assistant };
+        Messages.Add(response);
+        IsResponding = true;
+        StreamingMessageId = response.Id;
+        ResponseCancellation = new CancellationTokenSource();
+        var rawResponse = "";
+        try
+        {
+            await foreach (var chunk in Conversation.StreamAsync(history, prompt, ActiveSceneId, ResponseCancellation.Token))
+            {
+                rawResponse += chunk;
+                response.Content = AgentProposalParser.GetStreamingDisplayText(rawResponse);
+                await InvokeAsync(StateHasChanged);
+            }
+            var parsed = AgentProposalParser.Extract(rawResponse);
+            response.Content = parsed.DisplayText;
+            response.Proposal = parsed.Proposal is null ? null : await AgentProposals.PrepareAsync(parsed.Proposal);
+            if (response.Proposal is not null) await OnProposalPrepared.InvokeAsync(response.Proposal);
+            try { await ProjectMemory.UpdateAsync(prompt, response.Content, ResponseCancellation.Token); }
+            catch (Exception) { }
+        }
+        catch (OperationCanceledException)
+        {
+            if (response.Content.Length == 0) response.Content = "התגובה הופסקה.";
+        }
+        catch (Exception exception)
+        {
+            response.Content = $"לא ניתן היה לקבל תגובה: {exception.Message}";
+        }
+        finally
+        {
+            ResponseCancellation.Dispose();
+            ResponseCancellation = null;
+            IsResponding = false;
+            StreamingMessageId = null;
+        }
+    }
+
+    private void CancelResponse() => ResponseCancellation?.Cancel();
+    private string SyncStatusText => SyncStatus.LastResult.State switch
+    {
+        SyncState.Pushed => "מסונכרן",
+        SyncState.Conflict => "התנגשות",
+        SyncState.AuthenticationFailed => "נדרש חיבור",
+        SyncState.Offline => "לא מקוון",
+        SyncState.Failed => "שגיאת Git",
+        _ => "נשמר"
+    };
+
+    private async Task RetrySync() => await SnapshotCoordinator.RetryNowAsync();
+
+    private void OpenProjectFolder()
+    {
+        var path = ProjectSelection.CurrentProjectPath;
+        if (OperatingSystem.IsWindows()) System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", path) { UseShellExecute = true });
+        else if (OperatingSystem.IsMacOS()) System.Diagnostics.Process.Start("open", path);
+    }
+
+    private void HandleSyncChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private static string ProposalNoticeText(AgentProposal proposal) => proposal switch
+    {
+        { IsUndone: true } => "השינוי בוטל",
+        { IsApplied: true } => "השינוי הוחל",
+        { IsRejected: true } => "ההצעה בוטלה",
+        { IsStale: true } => "ההצעה כבר אינה עדכנית",
+        _ => $"{proposal.Operations.Count} שינויים מוצגים בכתב היד"
+    };
+
+    public void Dispose()
+    {
+        ResponseCancellation?.Cancel();
+        ResponseCancellation?.Dispose();
+        SyncStatus.Changed -= HandleSyncChanged;
+    }
+}

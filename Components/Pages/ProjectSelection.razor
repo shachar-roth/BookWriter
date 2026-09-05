@@ -1,0 +1,256 @@
+@page "/"
+@rendermode InteractiveServer
+
+@inject DocxImportService DocxImportService
+@inject FolderPickerService FolderPickerService
+@inject GitRepositoryService GitRepositoryService
+@inject NavigationManager Navigation
+@inject ProjectSelectionService ProjectService
+@inject StoryRepository StoryRepository
+
+<PageTitle>בחירת פרויקט</PageTitle>
+
+<main class="project-entry-shell">
+    <section class="project-entry-panel" aria-label="בחירת פרויקט">
+        <header>
+            <p>מרחב כתיבה</p>
+            <h1>בחירת פרויקט</h1>
+        </header>
+
+        @if (!string.IsNullOrWhiteSpace(StatusMessage))
+        {
+            <p class="project-entry-status">@StatusMessage</p>
+        }
+
+        <div class="project-entry-actions">
+            <a class="project-entry-action project-entry-primary" href="/editor">
+                <span>@ProjectService.CurrentProjectName</span>
+                <small class="project-path">@ProjectService.CurrentProjectPath</small>
+            </a>
+
+            <button type="button" class="project-entry-action" @onclick="StartNewProject">
+                <span>פרויקט חדש</span>
+                <small>בחר תיקייה ריקה והתחל סיפור</small>
+            </button>
+
+            <button type="button" class="project-entry-action" @onclick="OpenExistingProject">
+                <span>פתח פרויקט</span>
+                <small>בחר תיקייה שיש בה תיקיית Scenes</small>
+            </button>
+
+            <label class="project-entry-action import-project-control">
+                <span>@(IsImporting ? "קורא..." : "ייבוא DOCX")</span>
+                <small>חלוקה לפי כותרות ומפרידי סצנות</small>
+                <InputFile class="import-docx-input" OnChange="PrepareDocxImport" accept=".docx" disabled="@IsImporting" />
+            </label>
+
+            <button type="button" class="project-entry-action" @onclick="() => ToggleGitPanel(false)">
+                <span>חיבור Git</span>
+                <small>חבר את הפרויקט הנוכחי לשרת מרוחק</small>
+            </button>
+
+            <button type="button" class="project-entry-action" @onclick="() => ToggleGitPanel(true)">
+                <span>שכפול מ-Git</span>
+                <small>הורד פרויקט קיים לתיקייה מקומית</small>
+            </button>
+
+            <a class="project-entry-action" href="/diagnostics/export" download>
+                <span>חבילת אבחון</span>
+                <small>הורדת הפרויקט הנוכחי והלוגים כ-ZIP</small>
+            </a>
+        </div>
+
+        @if (ShowGitPanel)
+        {
+            <section class="git-setup-panel" aria-label="הגדרת Git">
+                <header>
+                    <strong>@(IsCloneMode ? "שכפול פרויקט" : "חיבור הפרויקט הנוכחי")</strong>
+                    <button type="button" title="סגירה" aria-label="סגירה" @onclick="CloseGitPanel">×</button>
+                </header>
+                <label>
+                    <span>כתובת המאגר</span>
+                    <input dir="ltr" type="url" @bind="RemoteUrl" placeholder="@("https://... או git@...")" />
+                </label>
+                <button type="button" class="git-setup-confirm" disabled="@IsGitBusy" @onclick="RunGitSetup">
+                    @(IsGitBusy ? "מבצע..." : IsCloneMode ? "בחר תיקייה ושכפל" : "חבר")
+                </button>
+            </section>
+        }
+
+        @if (PendingImport is not null)
+        {
+            <section class="import-preview" aria-label="תצוגה מקדימה של הייבוא">
+                <div>
+                    <strong>@PendingImport.SourceName</strong>
+                    <span>@PendingImport.Chapters.Count פרקים · @PendingImport.SceneCount סצנות</span>
+                </div>
+                <div class="import-preview-actions">
+                    <button type="button" @onclick="CancelImport">ביטול</button>
+                    <button type="button" class="confirm-import" @onclick="ConfirmImport">ייבוא</button>
+                </div>
+            </section>
+        }
+
+        @if (RecentProjects.Count > 0)
+        {
+            <section class="recent-projects" aria-label="פרויקטים אחרונים">
+                <h2>אחרונים</h2>
+                @foreach (var path in RecentProjects)
+                {
+                    <button type="button" @onclick="() => OpenRecentProject(path)">
+                        <strong>@GetProjectName(path)</strong>
+                        <span>@path</span>
+                    </button>
+                }
+            </section>
+        }
+    </section>
+</main>
+
+@code {
+    private bool IsImporting { get; set; }
+    private string StatusMessage { get; set; } = "";
+    private DocxImportDocument? PendingImport { get; set; }
+    private bool ShowGitPanel { get; set; }
+    private bool IsCloneMode { get; set; }
+    private bool IsGitBusy { get; set; }
+    private string RemoteUrl { get; set; } = "";
+    private IReadOnlyList<string> RecentProjects => ProjectService.RecentProjectPaths
+        .Where(path => !string.Equals(path, ProjectService.CurrentProjectPath, StringComparison.OrdinalIgnoreCase))
+        .Take(5)
+        .ToList();
+
+    private async Task StartNewProject()
+    {
+        var projectPath = await FolderPickerService.PickFolderAsync("בחרו תיקייה ריקה לפרויקט החדש");
+        if (string.IsNullOrWhiteSpace(projectPath)) return;
+
+        try
+        {
+            await StoryRepository.StartNewProjectAsync(projectPath);
+            Navigation.NavigateTo("/editor");
+        }
+        catch (InvalidOperationException)
+        {
+            StatusMessage = "התיקייה כבר מכילה פרויקט. פתחו אותו כפרויקט קיים או בחרו תיקייה ריקה.";
+        }
+    }
+
+    private async Task OpenExistingProject()
+    {
+        var projectPath = await FolderPickerService.PickFolderAsync("בחרו תיקיית פרויקט");
+        if (string.IsNullOrWhiteSpace(projectPath)) return;
+        await OpenProjectPath(projectPath);
+    }
+
+    private Task OpenRecentProject(string projectPath) => OpenProjectPath(projectPath);
+
+    private async Task OpenProjectPath(string projectPath)
+    {
+        var opened = await StoryRepository.OpenExistingProjectAsync(projectPath);
+        if (!opened)
+        {
+            StatusMessage = "לא נמצא פרויקט בתיקייה שנבחרה. צריך לבחור תיקייה שיש בה תיקיית Scenes.";
+            return;
+        }
+        Navigation.NavigateTo("/editor");
+    }
+
+    private async Task PrepareDocxImport(InputFileChangeEventArgs args)
+    {
+        var file = args.File;
+        if (!file.Name.EndsWith(".docx", StringComparison.OrdinalIgnoreCase))
+        {
+            StatusMessage = "אפשר לייבא רק קובץ DOCX";
+            return;
+        }
+
+        IsImporting = true;
+        StatusMessage = "קורא את מבנה המסמך...";
+        try
+        {
+            await using var stream = file.OpenReadStream(maxAllowedSize: 50 * 1024 * 1024);
+            PendingImport = await DocxImportService.ExtractDocumentAsync(stream, Path.GetFileNameWithoutExtension(file.Name));
+            StatusMessage = PendingImport.SceneCount == 0 ? "לא נמצא טקסט בקובץ" : "בדקו את החלוקה ואשרו את הייבוא";
+            if (PendingImport.SceneCount == 0) PendingImport = null;
+        }
+        catch (Exception)
+        {
+            PendingImport = null;
+            StatusMessage = "הייבוא נכשל. ודאו שהקובץ הוא DOCX תקין";
+        }
+        finally
+        {
+            IsImporting = false;
+        }
+    }
+
+    private async Task ConfirmImport()
+    {
+        if (PendingImport is null) return;
+        IsImporting = true;
+        await StoryRepository.ImportDocumentAsync(PendingImport);
+        Navigation.NavigateTo("/editor");
+    }
+
+    private void CancelImport()
+    {
+        PendingImport = null;
+        StatusMessage = "";
+    }
+
+    private void ToggleGitPanel(bool cloneMode)
+    {
+        ShowGitPanel = true;
+        IsCloneMode = cloneMode;
+        StatusMessage = "";
+    }
+
+    private void CloseGitPanel()
+    {
+        ShowGitPanel = false;
+        RemoteUrl = "";
+    }
+
+    private async Task RunGitSetup()
+    {
+        if (string.IsNullOrWhiteSpace(RemoteUrl))
+        {
+            StatusMessage = "יש להזין כתובת מאגר Git.";
+            return;
+        }
+
+        IsGitBusy = true;
+        try
+        {
+            if (IsCloneMode)
+            {
+                var destination = await FolderPickerService.PickFolderAsync("בחרו תיקייה ריקה לשכפול הפרויקט");
+                if (string.IsNullOrWhiteSpace(destination)) return;
+                var cloned = await GitRepositoryService.CloneAsync(RemoteUrl, destination);
+                if (!cloned.Success)
+                {
+                    StatusMessage = $"השכפול נכשל: {cloned.Error}";
+                    return;
+                }
+                if (!await StoryRepository.OpenExistingProjectAsync(destination))
+                {
+                    StatusMessage = "המאגר שוכפל, אבל לא נמצא בו פרויקט סיפור תקין.";
+                    return;
+                }
+                Navigation.NavigateTo("/editor");
+                return;
+            }
+
+            var attached = await GitRepositoryService.AttachRemoteAsync(ProjectService.CurrentProjectPath, RemoteUrl);
+            StatusMessage = attached.Success ? "המאגר המרוחק חובר לפרויקט." : $"החיבור נכשל: {attached.Error}";
+            if (attached.Success) CloseGitPanel();
+        }
+        finally
+        {
+            IsGitBusy = false;
+        }
+    }
+
+    private static string GetProjectName(string path) => new DirectoryInfo(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)).Name;
+}

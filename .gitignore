@@ -1,0 +1,21 @@
+# Local application data: projects, settings, logs, and credentials.
+App_Data/
+
+# Build and package output.
+**/bin/
+**/obj/
+artifacts/
+.tools/
+TestResults/
+
+# IDE and operating-system files.
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+.DS_Store
+
+# Local diagnostics.
+*.log
+*.zip

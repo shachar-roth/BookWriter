@@ -1,0 +1,89 @@
+@using Microsoft.AspNetCore.Components.Web
+
+@if (IsEditing)
+{
+    <input @ref="Input"
+           class="metadata-chip-input @(Wide ? "is-wide" : "")"
+           value="@Draft"
+           list="@SuggestionListId"
+           aria-label="@EditLabel"
+           @oninput="UpdateDraft"
+           @onkeydown="HandleKeyDown"
+           @onblur="Commit" />
+    @if (Suggestions.Count > 0)
+    {
+        <datalist id="@SuggestionListId">
+            @foreach (var suggestion in Suggestions)
+            {
+                <option value="@suggestion"></option>
+            }
+        </datalist>
+    }
+}
+else
+{
+    <button type="button"
+            class="metadata-chip @(IsAdd ? "is-add" : "") @(Wide ? "is-wide" : "")"
+            title="@(IsAdd ? AddLabel : EditLabel)"
+            aria-label="@(IsAdd ? AddLabel : $"{EditLabel}: {Value}")"
+            @onclick="BeginEditing">@(IsAdd ? "+" : Value)</button>
+}
+
+@code {
+    [Parameter] public string Value { get; set; } = "";
+    [Parameter] public bool IsAdd { get; set; }
+    [Parameter] public bool Wide { get; set; }
+    [Parameter] public string EditLabel { get; set; } = "עריכה";
+    [Parameter] public string AddLabel { get; set; } = "הוספה";
+    [Parameter] public IReadOnlyList<string> Suggestions { get; set; } = [];
+    [Parameter] public EventCallback<string> OnCommit { get; set; }
+
+    private ElementReference Input { get; set; }
+    private bool IsEditing { get; set; }
+    private bool FocusPending { get; set; }
+    private string Draft { get; set; } = "";
+    private string SuggestionListId { get; } = $"metadata-suggestions-{Guid.NewGuid():N}";
+
+    protected override void OnParametersSet()
+    {
+        if (!IsEditing) Draft = Value;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!FocusPending) return;
+        FocusPending = false;
+        await Input.FocusAsync();
+    }
+
+    private void BeginEditing()
+    {
+        Draft = Value;
+        IsEditing = true;
+        FocusPending = true;
+    }
+
+    private void UpdateDraft(ChangeEventArgs args) => Draft = args.Value?.ToString() ?? "";
+
+    private async Task HandleKeyDown(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter") await Commit();
+        else if (args.Key == "Escape") Cancel();
+    }
+
+    private async Task Commit()
+    {
+        if (!IsEditing) return;
+        IsEditing = false;
+        var normalized = Draft.Trim();
+        if (IsAdd && normalized.Length == 0) return;
+        if (!IsAdd && string.Equals(normalized, Value.Trim(), StringComparison.Ordinal)) return;
+        await OnCommit.InvokeAsync(normalized);
+    }
+
+    private void Cancel()
+    {
+        Draft = Value;
+        IsEditing = false;
+    }
+}
