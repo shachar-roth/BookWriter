@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace IsraeliAuthorStudio.Services;
 
@@ -62,6 +63,34 @@ public static class DesktopApplication
         }
 
         Process.Start(new ProcessStartInfo(address) { UseShellExecute = true });
+    }
+
+    public static void PublishUpdateHealth(string[] args, string dataRoot, string endpoint)
+    {
+        const string prefix = "--update-health-file=";
+        var argument = args.FirstOrDefault(value => value.StartsWith(prefix, StringComparison.Ordinal));
+        if (argument is null) return;
+
+        try
+        {
+            var updateRoot = Path.GetFullPath(Path.Combine(dataRoot, "Updates"));
+            var healthPath = Path.GetFullPath(argument[prefix.Length..]);
+            if (!healthPath.StartsWith(updateRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal)) return;
+
+            Directory.CreateDirectory(updateRoot);
+            var temporaryPath = $"{healthPath}.tmp-{Guid.NewGuid():N}";
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(new
+            {
+                processId = Environment.ProcessId,
+                endpoint,
+                startedAt = DateTimeOffset.UtcNow
+            }));
+            File.Move(temporaryPath, healthPath, overwrite: true);
+        }
+        catch
+        {
+            // The updater will time out and restore the previous bundle if this signal cannot be written.
+        }
     }
 
     private static bool TryReadEndpoint(string path, out string endpoint)

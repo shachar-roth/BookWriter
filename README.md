@@ -28,6 +28,8 @@ GitHub Actions tests every change. Pushing a semantic version tag such as `v1.1.
 
 The macOS packages currently use ad-hoc signatures and are not notarized. See [the macOS installation notes](Packaging/macos/README.md) before installing them.
 
+Installed macOS builds check the repository's latest GitHub Release at startup and every six hours. A newer package for the Mac's architecture is downloaded in the background and verified against `SHA256SUMS.txt`. The user can then restart and install it with one click. Manuscripts and settings remain under `~/Library/Application Support/IsraeliAuthorStudio`; if the updated local server does not start successfully, the external update helper restores and relaunches the previous app bundle.
+
 ## Project layout
 
 - `Scenes/` contains one Markdown file per scene.

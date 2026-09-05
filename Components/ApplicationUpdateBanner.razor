@@ -1,0 +1,72 @@
+@implements IDisposable
+@inject ApplicationUpdateService UpdateService
+
+@if (!Dismissed && Snapshot.State is ApplicationUpdateState.Downloading or ApplicationUpdateState.Ready or ApplicationUpdateState.Installing or ApplicationUpdateState.Failed)
+{
+    <aside class="application-update-banner" role="status" aria-live="polite">
+        <div>
+            <strong>@Title</strong>
+            @if (!string.IsNullOrWhiteSpace(Description))
+            {
+                <span>@Description</span>
+            }
+        </div>
+
+        @if (Snapshot.State == ApplicationUpdateState.Ready)
+        {
+            <button type="button" class="application-update-primary" @onclick="InstallUpdate">הפעל מחדש ועדכן</button>
+        }
+        else if (Snapshot.State == ApplicationUpdateState.Failed)
+        {
+            <button type="button" class="application-update-primary" @onclick="Retry">נסה שוב</button>
+        }
+
+        @if (Snapshot.State is not ApplicationUpdateState.Installing)
+        {
+            <button type="button" class="application-update-dismiss" title="סגירה" aria-label="סגירת הודעת העדכון" @onclick="Dismiss">×</button>
+        }
+    </aside>
+}
+
+@code {
+    private ApplicationUpdateSnapshot Snapshot => UpdateService.Snapshot;
+    private bool Dismissed { get; set; }
+
+    private string Title => Snapshot.State switch
+    {
+        ApplicationUpdateState.Downloading => $"מוריד גרסה {Snapshot.Version}",
+        ApplicationUpdateState.Ready => $"גרסה {Snapshot.Version} מוכנה להתקנה",
+        ApplicationUpdateState.Installing => "מתקין את העדכון...",
+        ApplicationUpdateState.Failed => "העדכון לא הושלם",
+        _ => ""
+    };
+
+    private string? Description => Snapshot.State switch
+    {
+        ApplicationUpdateState.Downloading => "ההורדה והאימות מתבצעים ברקע.",
+        ApplicationUpdateState.Ready => "היישום ייסגר, יוחלף וייפתח מחדש באופן אוטומטי.",
+        ApplicationUpdateState.Installing => "הדפדפן ייפתח מחדש כשהגרסה החדשה תהיה מוכנה.",
+        ApplicationUpdateState.Failed => Snapshot.Error,
+        _ => null
+    };
+
+    protected override void OnInitialized() => UpdateService.StateChanged += HandleStateChanged;
+
+    private async Task InstallUpdate() => await UpdateService.InstallAsync();
+
+    private async Task Retry()
+    {
+        Dismissed = false;
+        await UpdateService.RetryAsync();
+    }
+
+    private void Dismiss() => Dismissed = true;
+
+    private void HandleStateChanged()
+    {
+        Dismissed = false;
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose() => UpdateService.StateChanged -= HandleStateChanged;
+}

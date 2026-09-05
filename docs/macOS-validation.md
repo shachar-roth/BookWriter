@@ -12,3 +12,6 @@ Run this checklist on a current macOS machine after copying or cloning the appli
 8. Clone the remote through the project screen into an empty folder and verify the cloned story opens.
 9. Create conflicting edits on two machines, verify automatic rebase aborts on conflict, local scene text is unchanged, and sync pauses without force-pushing.
 10. Close the final editor tab and then stop the app normally. Confirm each event schedules a final local snapshot without displaying an unhandled error.
+11. Install an older tagged release, publish a newer patch release, and relaunch the app. Confirm the update notification appears after the package downloads.
+12. Choose the restart-and-update action. Confirm the browser opens again, the version under `Israeli Author Studio.app/Contents/Info.plist` changed, and existing projects and assistant settings remain available.
+13. Review `~/Library/Application Support/IsraeliAuthorStudio/Logs/updater.log` and confirm the update completed successfully.

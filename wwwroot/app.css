@@ -16,6 +16,69 @@ textarea {
     font: inherit;
 }
 
+.application-update-banner {
+    position: fixed;
+    right: 50%;
+    bottom: 18px;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: min(calc(100vw - 32px), 620px);
+    min-height: 58px;
+    padding: 10px 12px;
+    border: 1px solid #9aa8b7;
+    border-radius: 7px;
+    background: #fff;
+    color: #172033;
+    box-shadow: 0 12px 30px rgba(23, 32, 51, 0.2);
+    direction: rtl;
+    transform: translateX(50%);
+}
+
+.application-update-banner > div {
+    display: grid;
+    flex: 1;
+    gap: 2px;
+    min-width: 0;
+}
+
+.application-update-banner strong {
+    font-size: 0.9rem;
+}
+
+.application-update-banner span {
+    color: #526172;
+    font-size: 0.74rem;
+    line-height: 1.4;
+}
+
+.application-update-banner button {
+    flex: 0 0 auto;
+    min-height: 34px;
+    cursor: pointer;
+}
+
+.application-update-primary {
+    padding: 0 12px;
+    border: 1px solid #173b57;
+    border-radius: 5px;
+    background: #173b57;
+    color: #fff;
+    font-weight: 700;
+}
+
+.application-update-dismiss {
+    display: grid;
+    width: 30px;
+    padding: 0;
+    place-items: center;
+    border: 0;
+    background: transparent;
+    color: #526172;
+    font-size: 1.2rem;
+}
+
 .story-shell {
     --editor-font-family: Arial, 'Helvetica Neue', sans-serif;
     --editor-font-size: 18px;

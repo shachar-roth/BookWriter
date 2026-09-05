@@ -21,6 +21,19 @@ builder.Logging.AddProvider(new LocalFileLoggerProvider(applicationData));
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 builder.Services.AddSingleton(applicationData);
+builder.Services.AddSingleton(new ApplicationUpdateOptions
+{
+    Enabled = desktopMode && OperatingSystem.IsMacOS()
+});
+builder.Services.AddHttpClient("ApplicationUpdates", client =>
+{
+    client.BaseAddress = new Uri("https://api.github.com/");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("IsraeliAuthorStudio-Updater/1.0");
+    client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+    client.Timeout = TimeSpan.FromMinutes(5);
+});
+builder.Services.AddSingleton<ApplicationUpdateService>();
+builder.Services.AddHostedService(provider => provider.GetRequiredService<ApplicationUpdateService>());
 builder.Services.AddSingleton<ProjectSelectionService>();
 builder.Services.AddSingleton<FolderPickerService>();
 builder.Services.AddSingleton<DiagnosticBundleService>();
@@ -133,6 +146,7 @@ var addresses = app.Services.GetRequiredService<IServer>()
 var address = addresses?.FirstOrDefault(value => value.StartsWith("http://", StringComparison.OrdinalIgnoreCase));
 if (string.IsNullOrWhiteSpace(address)) throw new InvalidOperationException("The desktop server did not publish a local address.");
 desktopSession!.PublishEndpoint(address);
+DesktopApplication.PublishUpdateHealth(args, applicationData.RootPath, address);
 DesktopApplication.OpenBrowser(address);
 await app.WaitForShutdownAsync();
 
