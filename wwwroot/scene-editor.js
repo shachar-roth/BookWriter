@@ -95,6 +95,12 @@ window.sceneEditor = {
         return document.querySelector(`[data-scene-textarea="${sceneId}"]`)?.selectionStart ?? 0;
     },
 
+    getSelectedText(sceneId) {
+        const textarea = document.querySelector(`[data-scene-textarea="${sceneId}"]`);
+        if (!textarea) return "";
+        return textarea.value.slice(textarea.selectionStart, Math.min(textarea.selectionEnd, textarea.selectionStart + 2001));
+    },
+
     setSceneReadOnly(sceneId, isReadOnly) {
         const textarea = document.querySelector(`[data-scene-textarea="${sceneId}"]`);
         if (textarea) textarea.readOnly = Boolean(isReadOnly);

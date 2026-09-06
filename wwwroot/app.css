@@ -270,6 +270,14 @@ textarea {
     align-self: flex-end;
 }
 
+.assistant-reading-progress {
+    display: block;
+    margin-top: 4px;
+    color: #59636b;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+}
+
 .assistant-thinking {
     display: inline-flex;
     align-items: center;

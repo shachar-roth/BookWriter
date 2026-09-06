@@ -192,7 +192,12 @@ public sealed class OpenAiCompatibleChatClient : IChatClient
                 yield return new()
                 {
                     ["role"] = "tool", ["tool_call_id"] = result.CallId,
-                    ["content"] = result.Result is string text ? text : JsonSerializer.Serialize(result.Result)
+                    ["content"] = result.Result switch
+                    {
+                        string text => text,
+                        JsonElement json => json.GetRawText(),
+                        _ => JsonSerializer.Serialize(result.Result)
+                    }
                 };
             yield break;
         }

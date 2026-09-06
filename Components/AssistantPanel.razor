@@ -7,6 +7,7 @@
 @inject ProjectSelectionService ProjectSelection
 @inject ProjectMemoryService ProjectMemory
 @inject SyncStatusService SyncStatus
+@inject IJSRuntime JS
 
 <aside class="assistant-panel @(IsCollapsed ? "is-collapsed" : "")" aria-label="עוזר כתיבה">
     <header class="assistant-panel-header">
@@ -70,6 +71,10 @@
                         <span class="assistant-thinking" role="status" aria-label="העוזר עובד">
                             <span></span><span></span><span></span>
                         </span>
+                        @if (!string.IsNullOrEmpty(ReadingProgress))
+                        {
+                            <small class="assistant-reading-progress" role="status">@ReadingProgress</small>
+                        }
                     }
                     @if (message.Proposal is { } proposal)
                     {
@@ -114,6 +119,7 @@
     private string ApiKey { get; set; } = "";
     private string Draft { get; set; } = "";
     private string StatusMessage { get; set; } = "";
+    private string ReadingProgress { get; set; } = "";
     private bool IsCollapsed { get; set; }
     private bool ShowSettings { get; set; }
     private bool IsResponding { get; set; }
@@ -142,6 +148,7 @@
         ResponseCancellation?.Cancel();
         Messages.Clear();
         StatusMessage = "";
+        ReadingProgress = "";
     }
 
     private async Task Send()
@@ -151,6 +158,7 @@
         await OnBeforeRequest.InvokeAsync();
         Draft = "";
         StatusMessage = "";
+        ReadingProgress = "";
         var history = Messages.ToList();
         Messages.Add(new AssistantMessage { Role = AssistantMessageRole.User, Content = prompt });
         var response = new AssistantMessage { Role = AssistantMessageRole.Assistant };
@@ -161,9 +169,17 @@
         var rawResponse = "";
         try
         {
-            await foreach (var chunk in Conversation.StreamAsync(history, prompt, ActiveSceneId, ResponseCancellation.Token))
+            var selectedText = await JS.InvokeAsync<string>("sceneEditor.getSelectedText", ActiveSceneId);
+            await foreach (var chunk in Conversation.StreamAsync(history, prompt, ActiveSceneId, ResponseCancellation.Token,
+                selectedText, async status =>
+                {
+                    if (StreamingMessageId != response.Id || ResponseCancellation?.IsCancellationRequested != false) return;
+                    ReadingProgress = status;
+                    await InvokeAsync(StateHasChanged);
+                }))
             {
                 rawResponse += chunk;
+                ReadingProgress = "";
                 response.Content = AgentProposalParser.GetStreamingDisplayText(rawResponse);
                 await InvokeAsync(StateHasChanged);
             }
@@ -188,6 +204,7 @@
             ResponseCancellation = null;
             IsResponding = false;
             StreamingMessageId = null;
+            ReadingProgress = "";
         }
     }
 

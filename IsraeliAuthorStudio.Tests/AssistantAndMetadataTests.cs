@@ -156,7 +156,8 @@ public sealed class AssistantAndMetadataTests
         Assert.Equal("Found the previous scene.", output.ToString());
         Assert.Equal(3, handler.Requests.Count);
         using var first = JsonDocument.Parse(handler.Requests[0]);
-        var tool = Assert.Single(first.RootElement.GetProperty("tools").EnumerateArray()).GetProperty("function");
+        var tool = Assert.Single(first.RootElement.GetProperty("tools").EnumerateArray()
+            .Where(item => item.GetProperty("function").GetProperty("name").GetString() == "read_project_git")).GetProperty("function");
         Assert.Equal("read_project_git", tool.GetProperty("name").GetString());
         Assert.Contains("explicitly asks", tool.GetProperty("description").GetString());
         Assert.True(tool.GetProperty("parameters").GetProperty("properties").TryGetProperty("operation", out _));
@@ -189,6 +190,86 @@ public sealed class AssistantAndMetadataTests
         Assert.DoesNotContain(request.RootElement.GetProperty("messages").EnumerateArray(),
             message => message.GetProperty("role").GetString() == "tool");
         Assert.False(Directory.Exists(Path.Combine(context.Selection.CurrentProjectPath, ".git")));
+    }
+
+    [Fact]
+    public async Task FullBookToolWorkflowReadsHundredScenesWithBoundedRequestsAndWorkingNotes()
+    {
+        await using var project = await TestProject.CreateAsync(100, contentLength: 4500);
+        var handler = new BookReviewHandler();
+        var conversation = new AssistantConversationService(new HttpClientFactory(handler),
+            new AssistantReadTools(project.Repository, project.Selection));
+        var progress = new List<string>();
+        var output = new StringBuilder();
+        await foreach (var text in conversation.StreamAsync([], "Review the entire book, not a sample", project.SceneIds[0],
+            progress: status => { progress.Add(status); return Task.CompletedTask; })) output.Append(text);
+
+        Assert.Equal("Reviewed all 100 scenes.", output.ToString());
+        Assert.Equal(100, handler.SceneIds.Count);
+        Assert.InRange(handler.RequestCount, 7, 128);
+        Assert.True(handler.MaximumContextCharacters < 100000);
+        Assert.Contains(progress, status => status.Contains("100/100"));
+        Assert.True(handler.FinalRequestHasNotes);
+    }
+
+    [Fact]
+    public async Task PreparedProposalPreservesReadHashAndFlagsEditsMadeDuringResearch()
+    {
+        await using var project = await TestProject.CreateAsync(1);
+        var original = (await project.Repository.LoadWorkspaceAsync()).Scenes.Single();
+        var hash = SceneMetadataRepository.ComputeContentHash(original.Content);
+        await project.Repository.SaveSceneContentAsync(original.Id, "The writer edited while the assistant was reading.");
+        var service = new AgentProposalService(project.Repository, project.Selection,
+            new GitRepositoryService(NullLogger<GitRepositoryService>.Instance), new ProjectOperationCoordinator());
+        var proposal = await service.PrepareAsync(new AgentProposal { Operations = [new AgentOperation
+            { Kind = AgentOperationKind.ReplaceSceneText, SceneId = original.Id, Content = "suggested", ExpectedContentHash = hash }] });
+        Assert.True(proposal.IsStale);
+        Assert.Equal(hash, proposal.Operations.Single().ExpectedContentHash);
+        Assert.False((await service.ApplyAsync(proposal)).Success);
+    }
+
+    private sealed class BookReviewHandler : HttpMessageHandler
+    {
+        public HashSet<string> SceneIds { get; } = [];
+        public int RequestCount { get; private set; }
+        public int MaximumContextCharacters { get; private set; }
+        public bool FinalRequestHasNotes { get; private set; }
+        private int? _nextScene = 0;
+        private int _nextOffset;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            Assert.True(RequestCount <= 128);
+            using var json = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            var messages = json.RootElement.GetProperty("messages").EnumerateArray().ToList();
+            MaximumContextCharacters = Math.Max(MaximumContextCharacters, messages.Sum(message => message.GetProperty("content").GetString()?.Length ?? 0));
+            var results = messages.Where(message => message.GetProperty("role").GetString() == "tool").ToList();
+            string response;
+            if (results.Count > 0 && results[^1].GetProperty("tool_call_id").GetString()!.StartsWith("read", StringComparison.Ordinal))
+            {
+                using var result = JsonDocument.Parse(results[^1].GetProperty("content").GetString()!);
+                foreach (var chunk in result.RootElement.GetProperty("chunks").EnumerateArray())
+                {
+                    SceneIds.Add(chunk.GetProperty("sceneId").GetString()!);
+                    Assert.NotEmpty(chunk.GetProperty("text").GetString()!);
+                }
+                var cursor = result.RootElement.GetProperty("nextSceneIndex");
+                _nextScene = cursor.ValueKind == JsonValueKind.Null ? null : cursor.GetInt32();
+                _nextOffset = result.RootElement.GetProperty("nextOffset").GetInt32();
+                response = ToolStream($"notes-{RequestCount}", "keep_research_notes",
+                    JsonSerializer.Serialize(new { notes = "Evidence retained from scenes: " + string.Join(",", SceneIds) }));
+            }
+            else if (_nextScene is null)
+            {
+                FinalRequestHasNotes = messages.Any(message => message.GetProperty("role").GetString() == "system" &&
+                    message.GetProperty("content").GetString()!.Contains("Evidence retained from scenes:"));
+                Assert.Contains(messages, message => message.GetProperty("content").GetString()!.Contains("100/100"));
+                response = TextStream("Reviewed all 100 scenes.");
+            }
+            else response = ToolStream($"read-{RequestCount}", "read_manuscript", JsonSerializer.Serialize(new { sceneIndex = _nextScene, offset = _nextOffset }));
+            return new(HttpStatusCode.OK) { Content = new StringContent(response, Encoding.UTF8) };
+        }
     }
 
     [Fact]
@@ -256,7 +337,7 @@ public sealed class AssistantAndMetadataTests
         choices = new[] { new { delta = new { content = text }, finish_reason = "stop" } }
     }) + "\n\ndata: [DONE]\n\n";
 
-    private sealed class HttpClientFactory(SequenceHttpHandler handler) : IAssistantClientFactory
+    private sealed class HttpClientFactory(HttpMessageHandler handler) : IAssistantClientFactory
     {
         public Task<IChatClient?> CreateAsync(bool useMetadataModel, CancellationToken cancellationToken = default) =>
             Task.FromResult<IChatClient?>(new OpenAiCompatibleChatClient(new Uri("https://example.test/v1"), "fake", "test", messageHandler: handler));
@@ -386,16 +467,19 @@ public sealed class AssistantAndMetadataTests
     }
 
     [Fact]
-    public async Task HundredSceneContextIncludesMapButBoundsFullSceneRetrieval()
+    public async Task HundredSceneInitialContextContainsNoSceneTextOrAutomaticSearchResults()
     {
         await using var context = await TestProject.CreateAsync(sceneCount: 100);
         var tools = new AssistantReadTools(context.Repository, context.Selection);
 
         var result = await tools.BuildContextAsync("מילתמפתח", context.SceneIds[75]);
 
-        Assert.Equal(100, result.Split('\n').Count(line => line.StartsWith("- scn-", StringComparison.Ordinal)));
-        Assert.InRange(result.Split('\n').Count(line => line.StartsWith("### scn-", StringComparison.Ordinal)), 1, 7);
-        Assert.True(result.Length < 90_000, $"Context was {result.Length} characters.");
+        using var json = JsonDocument.Parse(result);
+        Assert.Equal(100, json.RootElement.GetProperty("sceneCount").GetInt32());
+        Assert.Equal(context.SceneIds[75], json.RootElement.GetProperty("activeSceneId").GetString());
+        Assert.DoesNotContain("מילתמפתח", result);
+        Assert.DoesNotContain(context.SceneIds[0], result);
+        Assert.True(result.Length < 2000, $"Context was {result.Length} characters.");
     }
 
     [Fact]
@@ -637,7 +721,7 @@ public sealed class AssistantAndMetadataTests
         public List<string> SceneIds { get; }
         public string RootPath => _root;
 
-        public static async Task<TestProject> CreateAsync(int sceneCount)
+        public static async Task<TestProject> CreateAsync(int sceneCount, int contentLength = 0)
         {
             var root = Path.Combine(Path.GetTempPath(), $"IsraeliAuthorStudio-assistant-tests-{Guid.NewGuid():N}");
             var project = Path.Combine(root, "Story");
@@ -649,7 +733,7 @@ public sealed class AssistantAndMetadataTests
             foreach (var (id, index) in ids.Select((id, index) => (id, index)))
             {
                 var markdown = $"---\nid: {id}\ntitle: Scene {index + 1}\nsummary: \ntimeline: \nplacesJson: []\ncreatedAt: {DateTimeOffset.UtcNow:O}\nupdatedAt: {DateTimeOffset.UtcNow:O}\n---\n\nמילתמפתח תוכן סצנה {index + 1}";
-                await File.WriteAllTextAsync(Path.Combine(scenesPath, $"{id}.scene.md"), markdown);
+                await File.WriteAllTextAsync(Path.Combine(scenesPath, $"{id}.scene.md"), markdown + new string('x', contentLength));
             }
             await File.WriteAllTextAsync(Path.Combine(indexesPath, "chapters.json"), System.Text.Json.JsonSerializer.Serialize(new ChaptersIndexDocument
             {

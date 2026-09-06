@@ -22,7 +22,26 @@ dotnet run
 
 Git must be installed. LLM and remote Git credentials are configured in the application and are never stored inside story repositories.
 
-## Asking the assistant about history
+## On-demand manuscript research
+
+Each conversation turn starts with a compact chapter overview, the active scene ID, up to 2000 selected
+characters and a short project-memory excerpt. Full scene text is not automatically sent to the model.
+Read tools can list every chapter and scene, search the whole manuscript, read any scene with pagination,
+inspect metadata and canonical character/location/timeline indexes, and retrieve the remaining project memory.
+
+Whole-book requests can use `read_manuscript` to move through all scenes in chapter order. The assistant keeps
+ephemeral cumulative research notes while older complete tool exchanges leave the active context. Retrieval
+coverage is counted separately from search hits; the assistant must disclose incomplete coverage instead of
+calling a sample exhaustive. Scene text and metadata are a saved snapshot at the start of the turn. Proposals
+retain that snapshot's hashes so edits made during research invalidate stale suggestions.
+
+Reads are bounded to 12000 text characters per page, at most 160 manuscript tool invocations and 128 model
+round trips per turn. Recent tool exchanges have a bounded context window; notes are limited to 12000 characters.
+The chat displays reading/search progress and can be canceled. Broad reviews can cost substantially more than
+targeted questions because they require reading more text and making more model calls. Retrieval quality still
+depends on the configured model; literal search is not semantic search, and inferred indexes may be incomplete.
+
+## Git history tool
 
 The writing assistant has a read-only `read_project_git` function tool. Ask about earlier versions of a scene,
 deleted text, recent saved changes, or local Git status. The assistant is instructed to use this tool only for
@@ -30,8 +49,8 @@ explicit history/recovery questions and their follow-ups, not ordinary writing o
 The configured chat provider/model must support OpenAI-compatible function calling and streaming tool calls.
 
 The tool can list commits, show manuscript diffs, and read a scene's Markdown at a saved commit, including
-deleted scenes. Results are paginated and bounded, with up to eight tool invocations and six model round trips
-per turn. Requested history excerpts are sent to the configured LLM provider as context; no separate GitHub
+deleted scenes. Git results are paginated and bounded, with up to eight Git tool invocations per turn.
+Requested history excerpts are sent to the configured LLM provider as context; no separate GitHub
 connection is used. Normal chat does not preload Git history.
 
 Access is limited to the current project's own repository and manuscript/index/scene-metadata files. The tool

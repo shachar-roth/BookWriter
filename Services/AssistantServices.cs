@@ -47,85 +47,25 @@ public sealed class AssistantReadTools
         _projects = projects;
     }
 
-    public async Task<StoryWorkspace> GetProjectOverviewAsync() => await _repository.LoadWorkspaceAsync();
-
-    public async Task<SceneDocument?> GetSceneAsync(string sceneId) =>
-        (await _repository.LoadWorkspaceAsync()).Scenes.FirstOrDefault(scene => scene.Id == sceneId);
-
-    public async Task<IReadOnlyList<SceneDocument>> SearchScenesAsync(string query, int maximum = 8)
+    public async Task<AssistantResearchSession> CreateSessionAsync(string? activeSceneId, string? selectedText = null,
+        Func<string, Task>? progress = null, CancellationToken cancellationToken = default)
     {
+        var path = _projects.CurrentProjectPath;
+        cancellationToken.ThrowIfCancellationRequested();
         var workspace = await _repository.LoadWorkspaceAsync();
-        var terms = Tokenize(query);
-        if (terms.Count == 0) return workspace.Scenes.Take(maximum).ToList();
-        return workspace.Scenes
-            .Select(scene => (Scene: scene, Score: terms.Sum(term => CountOccurrences($"{scene.Summary}\n{scene.Content}", term))))
-            .Where(item => item.Score > 0)
-            .OrderByDescending(item => item.Score)
-            .ThenBy(item => item.Scene.Order)
-            .Take(maximum)
-            .Select(item => item.Scene)
-            .ToList();
+        if (path != _projects.CurrentProjectPath) throw new InvalidOperationException("The open project changed. Please send the request again.");
+        var memoryPath = Path.Combine(path, "Assistant", "project-memory.md");
+        var memory = "";
+        if (File.Exists(memoryPath))
+        {
+            memory = await File.ReadAllTextAsync(memoryPath, cancellationToken);
+        }
+        return new AssistantResearchSession(workspace, activeSceneId, selectedText, memory,
+            () => path == _projects.CurrentProjectPath, progress);
     }
 
-    public async Task<string> BuildContextAsync(string query, string? activeSceneId, CancellationToken cancellationToken = default)
-    {
-        var workspace = await _repository.LoadWorkspaceAsync();
-        var selected = (await SearchScenesAsync(query, 6)).ToList();
-        var active = workspace.Scenes.FirstOrDefault(scene => scene.Id == activeSceneId);
-        if (active is not null && selected.All(scene => scene.Id != active.Id)) selected.Insert(0, active);
-        selected = selected.DistinctBy(scene => scene.Id).Take(7).ToList();
-
-        var memoryPath = Path.Combine(_projects.CurrentProjectPath, "Assistant", "project-memory.md");
-        var memory = File.Exists(memoryPath) ? await File.ReadAllTextAsync(memoryPath, cancellationToken) : "";
-        var builder = new StringBuilder();
-        builder.AppendLine($"ACTIVE SCENE ID: {active?.Id ?? "none"}");
-        builder.AppendLine("PROJECT MEMORY:");
-        builder.AppendLine(Truncate(memory, 6000));
-        builder.AppendLine("CHAPTER AND SCENE MAP:");
-        foreach (var chapter in workspace.ChaptersIndex.Chapters)
-        {
-            builder.AppendLine($"## {chapter.Name}");
-            foreach (var sceneId in chapter.SceneIds)
-            {
-                var scene = workspace.Scenes.FirstOrDefault(item => item.Id == sceneId);
-                if (scene is null) continue;
-                var summary = workspace.SceneMetadata.GetValueOrDefault(scene.Id)?.Summary;
-                builder.AppendLine($"- {scene.Id} [{SceneMetadataRepository.ComputeContentHash(scene.Content)}]: {Truncate(string.IsNullOrWhiteSpace(summary) ? SceneLabel(scene) : summary, 240)}");
-            }
-        }
-        builder.AppendLine("RELEVANT FULL SCENES:");
-        foreach (var scene in selected)
-        {
-            builder.AppendLine($"### {scene.Id} | {scene.Chapter} | hash={SceneMetadataRepository.ComputeContentHash(scene.Content)}");
-            builder.AppendLine(Truncate(scene.Content, 9000));
-        }
-        return builder.ToString();
-    }
-
-    private static List<string> Tokenize(string value) =>
-        Regex.Matches(value ?? "", @"[\p{L}\p{N}]{3,}")
-            .Select(match => match.Value)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Take(12)
-            .ToList();
-
-    private static int CountOccurrences(string text, string term)
-    {
-        var count = 0;
-        var index = 0;
-        while ((index = text.IndexOf(term, index, StringComparison.OrdinalIgnoreCase)) >= 0)
-        {
-            count++;
-            index += term.Length;
-        }
-        return count;
-    }
-
-    private static string Truncate(string? value, int maximum) =>
-        string.IsNullOrEmpty(value) || value.Length <= maximum ? value ?? "" : $"{value[..maximum]}\n[...]";
-
-    private static string SceneLabel(SceneDocument scene) =>
-        scene.Content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "סצנה ריקה";
+    public async Task<string> BuildContextAsync(string query, string? activeSceneId, CancellationToken cancellationToken = default) =>
+        (await CreateSessionAsync(activeSceneId, cancellationToken: cancellationToken)).InitialContext;
 }
 
 public sealed class AssistantConversationService
@@ -145,9 +85,12 @@ public sealed class AssistantConversationService
         IReadOnlyList<AssistantMessage> history,
         string prompt,
         string? activeSceneId,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default,
+        string? selectedText = null,
+        Func<string, Task>? progress = null)
     {
-        var options = new ChatOptions { Tools = _gitTools is null ? null : [_gitTools.CreateForConversation()] };
+        if (prompt.Length > 20000) throw new ArgumentException("The question is too long. Keep manuscript text in scenes and ask the assistant to read it.");
+        var gitTool = _gitTools?.CreateForConversation();
         var client = await _clients.CreateAsync(useMetadataModel: false, cancellationToken);
         if (client is null)
         {
@@ -155,31 +98,66 @@ public sealed class AssistantConversationService
             yield break;
         }
 
-        using var toolClient = new FunctionInvokingChatClient(client)
+        // Own the client even when context loading fails before the middleware is constructed.
+        using var ownedClient = client;
+        var research = await _tools.CreateSessionAsync(activeSceneId, selectedText, progress, cancellationToken);
+        var availableTools = research.CreateTools();
+        if (gitTool is not null) availableTools.Add(gitTool);
+        var options = new ChatOptions { Tools = availableTools };
+        var messages = new List<ChatMessage>
         {
-            MaximumIterationsPerRequest = 6,
+            new(ChatRole.System, BuildSystemPrompt(research.InitialContext))
+        };
+        var recent = new List<ChatMessage>();
+        var remaining = 16000;
+        foreach (var message in history.Where(message => message.Role is AssistantMessageRole.User or AssistantMessageRole.Assistant).TakeLast(20).Reverse())
+        {
+            var content = message.Content.Length > 6000 ? message.Content[..6000] + "\n[Earlier message truncated]" : message.Content;
+            if (content.Length > remaining) break;
+            remaining -= content.Length;
+            recent.Add(new ChatMessage(message.Role == AssistantMessageRole.User ? ChatRole.User : ChatRole.Assistant, content));
+        }
+        recent.Reverse();
+        messages.AddRange(recent);
+        messages.Add(new ChatMessage(ChatRole.User, prompt));
+
+        using var toolClient = new FunctionInvokingChatClient(new ResearchContextChatClient(client, research, messages.Count))
+        {
+            MaximumIterationsPerRequest = 128,
             AllowConcurrentInvocation = false,
             IncludeDetailedErrors = false
         };
-        var context = await _tools.BuildContextAsync(prompt, activeSceneId, cancellationToken);
-        var messages = new List<ChatMessage>
-        {
-            new(ChatRole.System, BuildSystemPrompt(context))
-        };
-        messages.AddRange(history.Where(message => message.Role is AssistantMessageRole.User or AssistantMessageRole.Assistant)
-            .TakeLast(20)
-            .Select(message => new ChatMessage(message.Role == AssistantMessageRole.User ? ChatRole.User : ChatRole.Assistant, message.Content)));
-        messages.Add(new ChatMessage(ChatRole.User, prompt));
-
+        var receivedText = false;
         await foreach (var update in toolClient.GetStreamingResponseAsync(messages, options, cancellationToken))
         {
-            if (!string.IsNullOrEmpty(update.Text)) yield return update.Text;
+            if (string.IsNullOrEmpty(update.Text)) continue;
+            receivedText = true;
+            yield return update.Text;
         }
+        if (!receivedText) yield return $"העוזר לא החזיר תשובה מסכמת. נקראו במלואן {research.FullyReadScenes} מתוך {research.TotalScenes} סצנות. אפשר לבקש להמשיך בבדיקה ממוקדת יותר.";
     }
 
     private static string BuildSystemPrompt(string context) => $$"""
         You are a Hebrew-first writing copilot for a book manuscript. Answer in the writer's language.
         Use only the supplied project context and tool results. State uncertainty instead of inventing story facts.
+        You can read EVERY scene and the supported project indexes on demand. The initial context deliberately
+        contains no full scene text. Never conclude that you lack manuscript access because text was not preloaded.
+        Use list_chapters/list_scenes to discover IDs, read_scene for text, search_manuscript for literal matches,
+        read_scene_metadata and read_project_index for summaries, characters, aliases, places and timeline hints.
+        read_project_memory retrieves the remaining project memory when its initial excerpt is insufficient.
+        Read any relevant scenes, not just the active scene or the first search hits. Search the entire manuscript
+        and follow aliases, alternative spellings, surrounding scenes and contradictory evidence when relevant.
+        Search is literal (not semantic); indexes may be incomplete. Never equate missing matches with proof of absence.
+        Follow pagination. Scene reads return current snapshot hashes; preserve those hashes in change proposals.
+        For whole-book review, use read_manuscript starting at sceneIndex=0, offset=0 and follow its cursor
+        through every chapter until nextSceneIndex is null. Evaluate every chunk before continuing. Keep compressed,
+        cumulative, scene-cited findings with keep_research_notes after each batch/chapter; older tool exchanges are
+        removed from active context. Notes replace the previous notes, so preserve earlier findings and open questions.
+        Check get_reading_progress before claiming exhaustive coverage. If a limit or interruption prevents finishing,
+        explicitly report partial coverage and the next cursor. Do not present a sample as a whole-book assessment.
+        Prefer short targeted retrieval for narrow questions; a whole-book review can take many model calls.
+        All tools read a stable saved manuscript snapshot from the start of this turn; subsequent edits may make proposals stale.
+        Do not narrate tool arguments or raw JSON. The UI reports reading/search progress; keep user-visible prose useful.
         You have read-only local Git access through read_project_git when that tool is available.
         Use it only for an explicit request about manuscript version history, earlier edits, missing text,
         recovery or Git status, or a direct follow-up to that request. Never inspect Git for ordinary writing
@@ -281,7 +259,9 @@ public sealed class AgentProposalService
             var scene = workspace.Scenes.FirstOrDefault(item => item.Id == operation.SceneId);
             if (scene is not null)
             {
-                operation.ExpectedContentHash = SceneMetadataRepository.ComputeContentHash(scene.Content);
+                var currentHash = SceneMetadataRepository.ComputeContentHash(scene.Content);
+                if (string.IsNullOrWhiteSpace(operation.ExpectedContentHash)) operation.ExpectedContentHash = currentHash;
+                else if (operation.ExpectedContentHash != currentHash) proposal.IsStale = true;
                 if (string.IsNullOrWhiteSpace(operation.PreviewBefore)) operation.PreviewBefore = Preview(scene.Content);
             }
             if (string.IsNullOrWhiteSpace(operation.PreviewAfter))
