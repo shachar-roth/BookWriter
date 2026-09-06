@@ -1,4 +1,5 @@
 @implements IDisposable
+@rendermode InteractiveServer
 @inject ApplicationUpdateService UpdateService
 
 @if (!Dismissed && Snapshot.State is ApplicationUpdateState.Downloading or ApplicationUpdateState.Ready or ApplicationUpdateState.Installing or ApplicationUpdateState.Failed)
