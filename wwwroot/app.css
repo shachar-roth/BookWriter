@@ -834,6 +834,41 @@ textarea {
     background: #edf1f5;
 }
 
+.application-update-controls {
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+    padding-top: 16px;
+    border-top: 1px solid #d7e0eb;
+    color: #526172;
+    font-size: 0.82rem;
+    text-align: center;
+    overflow-wrap: anywhere;
+}
+
+.application-update-controls-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 16px;
+}
+
+.application-update-controls button {
+    min-height: 34px;
+    min-width: 135px;
+    padding: 5px 12px;
+    border: 1px solid #cbd3dc;
+    border-radius: 5px;
+    color: #172033;
+    background: #fff;
+    cursor: pointer;
+}
+
+.application-update-controls button:hover:not(:disabled) { background: #f4f7fa; }
+.application-update-controls button:disabled { opacity: 0.6; cursor: wait; }
+.application-update-controls p { margin: 0; }
+
 .project-entry-panel {
     display: grid;
     gap: 24px;

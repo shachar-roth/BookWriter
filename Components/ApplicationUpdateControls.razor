@@ -1,0 +1,62 @@
+@implements IDisposable
+@rendermode InteractiveServer
+@inject ApplicationUpdateService Updates
+
+<footer class="application-update-controls" aria-label="גרסה ועדכונים">
+    <div class="application-update-controls-row">
+        <span>גרסה <bdi dir="ltr">@Updates.CurrentVersion</bdi></span>
+        <button type="button" disabled="@IsBusy" aria-busy="@(IsBusy ? "true" : "false")" @onclick="CheckForUpdates">
+            @(IsBusy ? "בודק עדכונים..." : "בדוק עדכונים")
+        </button>
+    </div>
+    @if (!string.IsNullOrEmpty(Message))
+    {
+        <p role="status" aria-live="polite">@Message</p>
+    }
+    @if (ShowManualDownload)
+    {
+        <a href="https://github.com/shachar-roth/BookWriter/releases/latest" target="_blank" rel="noopener noreferrer">הורדת הגרסה האחרונה</a>
+    }
+</footer>
+
+@code {
+    private bool IsChecking;
+    private bool ShowManualDownload;
+    private bool IsDisposed;
+    private bool IsBusy => IsChecking || Updates.Snapshot.State is ApplicationUpdateState.Checking or ApplicationUpdateState.Downloading or ApplicationUpdateState.Installing;
+    private string? Message => ShowManualDownload
+        ? "העדכון מתוך היישום זמין בגרסה המותקנת ל-Mac."
+        : Updates.Snapshot.State switch
+        {
+            ApplicationUpdateState.Checking => "בודק אם קיימת גרסה חדשה...",
+            ApplicationUpdateState.Downloading => $"מוריד ומאמת את גרסה {Updates.Snapshot.Version}...",
+            ApplicationUpdateState.Ready => $"גרסה {Updates.Snapshot.Version} מוכנה להתקנה.",
+            ApplicationUpdateState.Installing => "מתקין את העדכון...",
+            ApplicationUpdateState.UpToDate => "לא נמצא עדכון חדש.",
+            ApplicationUpdateState.Failed => Updates.Snapshot.Error ?? "בדיקת העדכונים נכשלה. אפשר לנסות שוב.",
+            _ => null
+        };
+
+    protected override void OnInitialized() => Updates.StateChanged += OnUpdateChanged;
+
+    private async Task CheckForUpdates()
+    {
+        if (IsBusy) return;
+        if (!Updates.IsSupported)
+        {
+            ShowManualDownload = true;
+            return;
+        }
+        IsChecking = true;
+        try { await Updates.CheckAndDownloadAsync(); }
+        finally { IsChecking = false; }
+    }
+
+    private void OnUpdateChanged() => _ = InvokeAsync(() => { if (!IsDisposed) StateHasChanged(); });
+
+    public void Dispose()
+    {
+        IsDisposed = true;
+        Updates.StateChanged -= OnUpdateChanged;
+    }
+}

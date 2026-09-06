@@ -159,6 +159,36 @@ public sealed class ApplicationUpdateTests
         Assert.Equal(ApplicationUpdateState.Ready, service.Snapshot.State);
         Assert.Equal("1.5.0", service.Snapshot.Version);
         Assert.True(File.Exists(Path.Combine(directory.Path, "data", "Updates", "1.5.0", packageName)));
+        var notified = false;
+        service.StateChanged += () => notified = true;
+        await service.CheckAndDownloadAsync();
+        Assert.True(notified);
+        Assert.Equal(ApplicationUpdateState.Ready, service.Snapshot.State);
+    }
+
+    [Theory]
+    [InlineData(404, ApplicationUpdateState.UpToDate)]
+    [InlineData(503, ApplicationUpdateState.Failed)]
+    [InlineData(200, ApplicationUpdateState.Failed)]
+    public async Task ManualCheckReportsNoReleaseSeparatelyFromServerOrManifestErrors(int httpStatus, ApplicationUpdateState expected)
+    {
+        using var directory = new TemporaryDirectory();
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage((System.Net.HttpStatusCode)httpStatus)
+        {
+            Content = new StringContent("{}")
+        });
+        var service = new ApplicationUpdateService(
+            new StubHttpClientFactory(new HttpClient(handler) { BaseAddress = new Uri("https://api.github.com/") }),
+            new ApplicationDataPaths(directory.Path),
+            new ApplicationUpdateOptions { Enabled = true, CurrentVersion = new Version(1, 2, 3) },
+            new StubApplicationLifetime(), NullLogger<ApplicationUpdateService>.Instance);
+        var states = new List<ApplicationUpdateState>();
+        service.StateChanged += () => states.Add(service.Snapshot.State);
+
+        await service.CheckAndDownloadAsync();
+
+        Assert.Equal("1.2.3", service.CurrentVersion);
+        Assert.Equal([ApplicationUpdateState.Checking, expected], states);
     }
 
     [Fact]

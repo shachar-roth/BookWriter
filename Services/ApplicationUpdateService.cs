@@ -16,7 +16,8 @@ public enum ApplicationUpdateState
     Downloading,
     Ready,
     Installing,
-    Failed
+    Failed,
+    UpToDate
 }
 
 public sealed record ApplicationUpdateSnapshot(
@@ -59,6 +60,7 @@ public sealed class ApplicationUpdateService(
     public event Action? StateChanged;
 
     public bool IsSupported => options.Enabled;
+    public string CurrentVersion => options.CurrentVersion.ToString(3);
 
     public ApplicationUpdateSnapshot Snapshot
     {
@@ -103,7 +105,11 @@ public sealed class ApplicationUpdateService(
         await _operationLock.WaitAsync(cancellationToken);
         try
         {
-            if (Snapshot.State is ApplicationUpdateState.Ready or ApplicationUpdateState.Installing) return;
+            if (Snapshot.State is ApplicationUpdateState.Ready or ApplicationUpdateState.Installing)
+            {
+                SetSnapshot(Snapshot);
+                return;
+            }
             SetSnapshot(new(ApplicationUpdateState.Checking));
             var client = httpClientFactory.CreateClient("ApplicationUpdates");
             using var response = await client.GetAsync(
@@ -113,7 +119,7 @@ public sealed class ApplicationUpdateService(
 
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
-                SetSnapshot(new(ApplicationUpdateState.Idle));
+                SetSnapshot(new(ApplicationUpdateState.UpToDate));
                 return;
             }
 
@@ -123,9 +129,10 @@ public sealed class ApplicationUpdateService(
                 releaseStream,
                 RuntimeInformation.ProcessArchitecture,
                 cancellationToken);
-            if (release is null || release.Version <= options.CurrentVersion)
+            if (release is null) throw new InvalidDataException("The release has no supported update package.");
+            if (release.Version <= options.CurrentVersion)
             {
-                SetSnapshot(new(ApplicationUpdateState.Idle));
+                SetSnapshot(new(ApplicationUpdateState.UpToDate));
                 return;
             }
 
