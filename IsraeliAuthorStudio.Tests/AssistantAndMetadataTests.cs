@@ -134,6 +134,146 @@ public sealed class AssistantAndMetadataTests
     }
 
     [Fact]
+    public async Task ConversationExecutesStreamedGitToolCallsAndKeepsTheirJsonOutOfChat()
+    {
+        await using var context = await TestProject.CreateAsync(1);
+        var git = new GitRepositoryService(NullLogger<GitRepositoryService>.Instance);
+        var root = context.Selection.CurrentProjectPath;
+        Assert.True((await git.EnsureProjectRepositoryAsync(root, "Writer", "writer@example.test")).Success);
+        var hash = (await git.GetHeadAsync(root)).Output.Trim();
+        var sceneId = context.SceneIds[0];
+        var handler = new SequenceHttpHandler(
+            ToolStream("call_history", "read_project_git", JsonSerializer.Serialize(new { operation = "History", sceneId })),
+            ToolStream("call_scene", "read_project_git", JsonSerializer.Serialize(new { operation = "SceneAtCommit", sceneId, commitHash = hash })),
+            TextStream("Found the previous scene."));
+        var conversation = new AssistantConversationService(new HttpClientFactory(handler),
+            new AssistantReadTools(context.Repository, context.Selection),
+            new AssistantGitTools(context.Selection, git, new ProjectOperationCoordinator()));
+
+        var output = new StringBuilder();
+        await foreach (var chunk in conversation.StreamAsync([], "Show the saved history of this scene", sceneId)) output.Append(chunk);
+
+        Assert.Equal("Found the previous scene.", output.ToString());
+        Assert.Equal(3, handler.Requests.Count);
+        using var first = JsonDocument.Parse(handler.Requests[0]);
+        var tool = Assert.Single(first.RootElement.GetProperty("tools").EnumerateArray()).GetProperty("function");
+        Assert.Equal("read_project_git", tool.GetProperty("name").GetString());
+        Assert.Contains("explicitly asks", tool.GetProperty("description").GetString());
+        Assert.True(tool.GetProperty("parameters").GetProperty("properties").TryGetProperty("operation", out _));
+        Assert.DoesNotContain(hash, handler.Requests[0]);
+        using var second = JsonDocument.Parse(handler.Requests[1]);
+        var historyResult = Assert.Single(second.RootElement.GetProperty("messages").EnumerateArray()
+            .Where(message => message.GetProperty("role").GetString() == "tool"));
+        Assert.Equal("call_history", historyResult.GetProperty("tool_call_id").GetString());
+        Assert.Contains(hash, historyResult.GetProperty("content").GetString());
+        using var third = JsonDocument.Parse(handler.Requests[2]);
+        var sceneResult = third.RootElement.GetProperty("messages").EnumerateArray()
+            .Last(message => message.GetProperty("role").GetString() == "tool");
+        using var result = JsonDocument.Parse(sceneResult.GetProperty("content").GetString()!);
+        Assert.True(result.RootElement.GetProperty("success").GetBoolean());
+        Assert.Contains("מילתמפתח", result.RootElement.GetProperty("output").GetString());
+        Assert.Equal(hash, (await git.GetHeadAsync(root)).Output.Trim());
+    }
+
+    [Fact]
+    public async Task OrdinaryConversationDoesNotAutomaticallyLoadGitHistory()
+    {
+        await using var context = await TestProject.CreateAsync(1);
+        var handler = new SequenceHttpHandler(TextStream("An idea for your story."));
+        var conversation = new AssistantConversationService(new HttpClientFactory(handler),
+            new AssistantReadTools(context.Repository, context.Selection),
+            new AssistantGitTools(context.Selection, new GitRepositoryService(NullLogger<GitRepositoryService>.Instance), new ProjectOperationCoordinator()));
+        await foreach (var _ in conversation.StreamAsync([], "Suggest a plot twist", context.SceneIds[0])) { }
+        Assert.Single(handler.Requests);
+        using var request = JsonDocument.Parse(handler.Requests[0]);
+        Assert.DoesNotContain(request.RootElement.GetProperty("messages").EnumerateArray(),
+            message => message.GetProperty("role").GetString() == "tool");
+        Assert.False(Directory.Exists(Path.Combine(context.Selection.CurrentProjectPath, ".git")));
+    }
+
+    [Fact]
+    public async Task GitToolIsBoundToProjectAndHasPerTurnBudget()
+    {
+        await using var context = await TestProject.CreateAsync(1);
+        var tools = new AssistantGitTools(context.Selection,
+            new GitRepositoryService(NullLogger<GitRepositoryService>.Instance), new ProjectOperationCoordinator());
+        var function = tools.CreateForConversation();
+        var arguments = new AIFunctionArguments { ["operation"] = "History" };
+        for (var i = 0; i < 8; i++) await function.InvokeAsync(arguments);
+        Assert.Contains("budget", JsonSerializer.Serialize(await function.InvokeAsync(arguments)));
+        var newTurn = tools.CreateForConversation();
+        var other = Directory.CreateDirectory(Path.Combine(context.RootPath, "OtherStory")).FullName;
+        await context.Selection.SetCurrentProjectPathAsync(other);
+        Assert.Contains("project changed", JsonSerializer.Serialize(await newTurn.InvokeAsync(arguments)));
+    }
+
+    [Fact]
+    public async Task TruncatedToolStreamIsNotExecuted()
+    {
+        var handler = new SequenceHttpHandler(ToolStream("one", "read_project_git", "{\"operation\":\"History\"}")
+            .Replace("\"finish_reason\":\"tool_calls\"", "\"finish_reason\":null"));
+        using var client = new OpenAiCompatibleChatClient(new Uri("https://example.test/v1"), "fake", "test", messageHandler: handler);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var update in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "history")]))
+                Assert.Empty(update.Contents.OfType<FunctionCallContent>());
+        });
+    }
+
+    [Fact]
+    public async Task NonStreamingToolCallsAndToolChoiceRoundTrip()
+    {
+        var body = """{"choices":[{"message":{"content":null,"tool_calls":[{"id":"one","type":"function","function":{"name":"read_project_git","arguments":"{\"operation\":\"History\"}"}}]}}]}""";
+        var handler = new SequenceHttpHandler(body);
+        using var client = new OpenAiCompatibleChatClient(new Uri("https://example.test/v1"), "fake", "test", messageHandler: handler);
+        var tool = AIFunctionFactory.Create(() => "test", "read_project_git");
+        var response = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "history")],
+            new ChatOptions { Tools = [tool], ToolMode = ChatToolMode.None });
+        var call = Assert.Single(response.Messages.Single().Contents.OfType<FunctionCallContent>());
+        Assert.Equal("one", call.CallId);
+        Assert.Equal("History", call.Arguments!["operation"]!.ToString());
+        using var request = JsonDocument.Parse(handler.Requests.Single());
+        Assert.Equal("none", request.RootElement.GetProperty("tool_choice").GetString());
+    }
+
+    private static string ToolStream(string id, string name, string arguments)
+    {
+        // Provider tool arguments arrive over multiple SSE chunks, not as one JSON document.
+        var half = arguments.Length / 2;
+        var first = JsonSerializer.Serialize(new { choices = new[] { new { delta = new
+        {
+            tool_calls = new[] { new { index = 0, id, type = "function", function = new { name, arguments = arguments[..half] } } }
+        } } } });
+        var second = JsonSerializer.Serialize(new { choices = new[] { new { delta = new
+        {
+            tool_calls = new[] { new { index = 0, function = new { arguments = arguments[half..] } } }
+        }, finish_reason = "tool_calls" } } });
+        return $"data: {first}\n\ndata: {second}\n\ndata: {{\"choices\":[]}}\n\ndata: [DONE]\n\n";
+    }
+
+    private static string TextStream(string text) => "data: " + JsonSerializer.Serialize(new
+    {
+        choices = new[] { new { delta = new { content = text }, finish_reason = "stop" } }
+    }) + "\n\ndata: [DONE]\n\n";
+
+    private sealed class HttpClientFactory(SequenceHttpHandler handler) : IAssistantClientFactory
+    {
+        public Task<IChatClient?> CreateAsync(bool useMetadataModel, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IChatClient?>(new OpenAiCompatibleChatClient(new Uri("https://example.test/v1"), "fake", "test", messageHandler: handler));
+    }
+
+    private sealed class SequenceHttpHandler(params string[] responses) : HttpMessageHandler
+    {
+        public List<string> Requests { get; } = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Requests.Add(await request.Content!.ReadAsStringAsync(cancellationToken));
+            Assert.InRange(Requests.Count, 1, responses.Length);
+            return new(HttpStatusCode.OK) { Content = new StringContent(responses[Requests.Count - 1], Encoding.UTF8) };
+        }
+    }
+
+    [Fact]
     public async Task MetadataMigrationPreservesManualValuesAndLocksThem()
     {
         await using var context = await TestProject.CreateAsync(sceneCount: 1);

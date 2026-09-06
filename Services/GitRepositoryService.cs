@@ -5,7 +5,7 @@ using IsraeliAuthorStudio.Models;
 
 namespace IsraeliAuthorStudio.Services;
 
-public sealed class GitRepositoryService
+public sealed partial class GitRepositoryService
 {
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(60);
     private static readonly string[] IgnoreEntries =

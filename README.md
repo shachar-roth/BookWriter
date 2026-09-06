@@ -22,6 +22,24 @@ dotnet run
 
 Git must be installed. LLM and remote Git credentials are configured in the application and are never stored inside story repositories.
 
+## Asking the assistant about history
+
+The writing assistant has a read-only `read_project_git` function tool. Ask about earlier versions of a scene,
+deleted text, recent saved changes, or local Git status. The assistant is instructed to use this tool only for
+explicit history/recovery questions and their follow-ups, not ordinary writing or fictional timeline questions.
+The configured chat provider/model must support OpenAI-compatible function calling and streaming tool calls.
+
+The tool can list commits, show manuscript diffs, and read a scene's Markdown at a saved commit, including
+deleted scenes. Results are paginated and bounded, with up to eight tool invocations and six model round trips
+per turn. Requested history excerpts are sent to the configured LLM provider as context; no separate GitHub
+connection is used. Normal chat does not preload Git history.
+
+Access is limited to the current project's own repository and manuscript/index/scene-metadata files. The tool
+cannot run arbitrary commands, access credentials or arbitrary paths, fetch, push, commit, checkout, or revert.
+Restoring text still uses the existing manuscript proposal workflow. Git only contains committed versions;
+unsaved browser drafts and `.history` recovery backups are not included. Working diffs cover tracked files saved
+to disk, not untracked file contents or unsaved browser edits.
+
 ## Releases
 
 GitHub Actions tests every change. Pushing a semantic version tag such as `v1.1.0` builds the self-contained Apple Silicon and Intel macOS packages and publishes them under [GitHub Releases](https://github.com/shachar-roth/BookWriter/releases).

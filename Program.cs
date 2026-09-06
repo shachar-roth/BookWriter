@@ -49,6 +49,7 @@ builder.Services.AddSingleton<StoryRepository>();
 builder.Services.AddSingleton<DocxImportService>();
 builder.Services.AddSingleton<IAssistantClientFactory, AssistantClientFactory>();
 builder.Services.AddSingleton<AssistantReadTools>();
+builder.Services.AddSingleton<AssistantGitTools>();
 builder.Services.AddSingleton<AssistantConversationService>();
 builder.Services.AddSingleton<MetadataAnalysisService>();
 builder.Services.AddSingleton<MetadataBatchProcessor>();
